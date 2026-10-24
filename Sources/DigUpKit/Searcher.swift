@@ -113,11 +113,14 @@ public final class Searcher {
     public static let codeWordWeight = 1.0
 
     public func search(_ text: String, queryVector: [Float]?, kinds: Set<FileKind>? = nil, limit: Int = 20,
-                       zGate: Double = 2.0, wordWeight: Double? = nil, prefixLast: Bool = false) throws -> [SearchHit] {
+                       zGate: Double = 2.0, wordWeight: Double? = nil, prefixLast: Bool = false,
+                       fileIDs: Set<Int64>? = nil) throws -> [SearchHit] {
         let wordWeight = wordWeight ?? (isCode ? Self.codeWordWeight : Self.wordWeight)
         if queryVector != nil, !vectorsLoaded { try reload() }
         let fileKind = self.fileKind
-        let allowed = { (file: Int64) -> Bool in kinds == nil || fileKind[file].map { kinds!.contains($0) } ?? false }
+        let allowed = { (file: Int64) -> Bool in
+            (fileIDs == nil || fileIDs!.contains(file)) && (kinds == nil || (fileKind[file].map { kinds!.contains($0) } ?? false))
+        }
 
         // Meaning: score every vector on this query's scale (`meaning`), keep each file's best segment.
         var best: [Int64: (z: Double, cosine: Double, row: Int)] = [:]
@@ -149,10 +152,11 @@ public final class Searcher {
         }
         if !patterns.isEmpty {
             var seen = Set<Int64>()
+            let personScope = fileIDs.map { " AND s.file IN (" + ($0.isEmpty ? "NULL" : $0.sorted().map(String.init).joined(separator: ",")) + ")" } ?? ""
             try store.db.query("""
                 SELECT s.file, s.id, snippet(fts, 1, '«', '»', '…', 12), fts.original FROM fts
                 JOIN segments s ON s.id = fts.rowid
-                WHERE fts MATCH ? ORDER BY bm25(fts, 3.0, 1.0) LIMIT 1000
+                WHERE fts MATCH ?\(personScope) ORDER BY bm25(fts, 3.0, 1.0) LIMIT 1000
                 """, [.text(patterns.joined(separator: " OR "))]) { row in
                 let file = row.int(0)
                 guard words.count < 100, allowed(file), seen.insert(file).inserted else { return }
@@ -175,6 +179,13 @@ public final class Searcher {
         // Score: meaning z + a bonus that grows with word coverage, + 1 for the kind the query asks for.
         // One common word can't beat a strong meaning match; all the words of an exact lookup usually do.
         // (This beat reciprocal-rank fusion on both evals, 2026-10-07: R@1 0.88 vs 0.73 synthetic, 0.86 vs 0.82 real.)
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let fileIDs {
+            for file in fileIDs.sorted() where allowed(file) {
+                try store.db.query("SELECT id FROM segments WHERE file=? ORDER BY CASE kind WHEN 'image' THEN 0 ELSE 1 END,id LIMIT 1", [.int(file)]) {
+                    words.append((file, $0.int(0), nil)); coverage[file] = 1
+                }
+            }
+        }
         let lookup = Self.isLookup(terms) || identifier != nil
         let (meaningWeight, wordsWeight) = lookup ? (0.5, wordWeight * 2) : (1, wordWeight)
         let hinted = Self.kindHints(text)

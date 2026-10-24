@@ -36,6 +36,7 @@ final class SearchPanelController {
     var query = "" {
         didSet { if query != oldValue { queryChanged() } }
     }
+    var personContext: PersonQuery { engine.personQuery(query) }
     private(set) var results = ResultSet.empty
     private(set) var showWeaker = false
     private(set) var selection: String?

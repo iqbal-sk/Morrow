@@ -142,6 +142,15 @@ nonisolated final class Engine: @unchecked Sendable {
     private var excludedTypes: [String]
     private var codeRoots: [URL]
     private var codeExcluded: [URL]
+    private var peopleProfiles: [PersonProfile] = []
+
+    func setPeople(_ profiles: [PersonProfile]) { lock.withLock { peopleProfiles = profiles } }
+    func faceSelection() -> [String: [String]] {
+        lock.withLock { ["roots": roots.map(\.path), "excluded": excluded.map(\.path), "types": excludedTypes] }
+    }
+    func personQuery(_ text: String) -> PersonQuery {
+        PeopleStore.resolve(text, profiles: lock.withLock { peopleProfiles })
+    }
 
     // indexQueue only
     /// Code search was turned off: the code index goes once no helper has it open.
@@ -844,8 +853,13 @@ nonisolated final class Engine: @unchecked Sendable {
                     }
                     values = nil
                 }
-                let hits = try? searcher?.search(text, queryVector: values, kinds: kinds, limit: limit,
-                                                 prefixLast: prefixLast)
+                let person = personQuery(text)
+                let filter = person.people.isEmpty ? nil : (try? searchStore.map {
+                    try PeopleStore(store: $0).fileIDs(for: person.people.map(\.id))
+                }) ?? Set<Int64>()
+                let searchText = person.people.isEmpty ? text : person.remainder
+                let hits = try? searcher?.search(searchText, queryVector: values, kinds: kinds, limit: limit,
+                                                 prefixLast: prefixLast, fileIDs: filter)
                 // Only files that are searched (`FolderSelection`'s rule, as the crawler walks them) and of types not
                 // skipped: a removed folder's rows (or a newly skipped type's) can outlive it until a helper syncs
                 // (indexing was paused, or the app quit first).
@@ -1001,12 +1015,15 @@ nonisolated final class Engine: @unchecked Sendable {
     }
 
     private func vector(for text: String, code: Bool) -> QueryVector? {
+        let context = code ? nil : personQuery(text)
+        let topic = context?.people.isEmpty == false ? context!.remainder : text
+        guard !topic.isEmpty else { return nil }
         let key = Self.cacheKey(text, code: code)
         if let cached = vectorCache[key] { return cached }
         guard let worker = runningEncoder() else { return nil }
         defer { scheduleIdleExit() }
         do {
-            let values = try worker.embedTexts([code ? Prompts.codeQuery(text) : Prompts.query(text)]).first ?? []
+            let values = try worker.embedTexts([code ? Prompts.codeQuery(topic) : Prompts.query(topic)]).first ?? []
             let vector = QueryVector(values: values, source: worker.info.vectorSource)
             vectorCache[key] = vector
             return vector

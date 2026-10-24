@@ -23,6 +23,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDelegate
     /// Dev and test runs (their own defaults suite) don't check: Sparkle keeps its state in the app's real defaults.
     /// `-debugUpdates YES` lets one check anyway.
     func start() {
+        guard Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil else { return }
         let defaults = UserDefaults.standard
         guard defaults.string(forKey: "defaultsSuite") == nil || defaults.bool(forKey: "debugUpdates") else { return }
         controller.startUpdater()
@@ -35,7 +36,7 @@ final class Updates: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDelegate
         set { controller.updater.automaticallyChecksForUpdates = newValue }
     }
 
-    var canCheck: Bool { controller.updater.canCheckForUpdates }
+    var canCheck: Bool { Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil && controller.updater.canCheckForUpdates }
 
     /// "Check for Updates…" and the waiting update's menu item: Sparkle's window, in front.
     func checkNow() {

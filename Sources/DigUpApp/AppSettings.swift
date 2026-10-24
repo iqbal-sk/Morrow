@@ -44,9 +44,9 @@ nonisolated struct AppSettings: Sendable {
     var codeQuietSeconds: Double
 
     static let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/DigUp")
+        .appendingPathComponent("Library/Application Support/DigUp People")
     static let defaultIndexDirectory = supportDirectory.appendingPathComponent("index.noindex")
-    static let defaultHotkey = "cmd+shift+space"
+    static let defaultHotkey = "ctrl+shift+space"
 
     /// The battery switch, in onboarding and Settings.
     static let batteryTitle = "Index on battery power"
@@ -68,7 +68,7 @@ nonisolated struct AppSettings: Sendable {
                 ?? defaults.string(forKey: "excludedTypes").map { [$0] } ?? [])
                 .flatMap { IndexOptions.extensions($0) }.sorted(),
             indexDirectory: defaults.string(forKey: "indexDir").map(folderURL) ?? defaultIndexDirectory,
-            modelsDirectory: defaults.string(forKey: "modelsDir").map(folderURL) ?? ModelFiles.installed,
+            modelsDirectory: defaults.string(forKey: "modelsDir").map(folderURL) ?? supportDirectory.appendingPathComponent("Models"),
             hotkey: defaults.string(forKey: "hotkey") ?? defaultHotkey,
             indexOnBattery: defaults.object(forKey: "indexOnBattery") == nil || defaults.bool(forKey: "indexOnBattery"),
             indexHoursOn: defaults.bool(forKey: "indexHoursOn"),

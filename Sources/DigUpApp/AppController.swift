@@ -11,6 +11,7 @@ final class AppController {
 
     let model: AppModel
     let engine: Engine
+    let people: PeopleCoordinator
     let download: ModelDownload
     let hotkeys = HotkeyCenter()
     let updates: Updates
@@ -52,6 +53,7 @@ final class AppController {
         self.power = power
         self.schedule = schedule
         self.engine = engine
+        people = PeopleCoordinator(settings: settings, engine: engine)
         updates = Updates(model: model)
     }
 
@@ -85,6 +87,11 @@ final class AppController {
         CodeEditor.current = CodeEditor.chosen(model.settings.codeEditor)
         download.onReady = { [weak self] in self?.engine.modelArrived() }
         engine.start()
+        people.mayIndex = { [weak model] in
+            guard let model else { return false }
+            return !model.status.paused && model.status.heldUntil == nil && model.status.waitingFor == nil
+        }
+        people.start()
         let settings = model.settings
         if !settings.onboarded, settings.roots.isEmpty {
             showOnboarding()
@@ -137,6 +144,7 @@ final class AppController {
         model.settings.excludedFolders = excluded
         model.settings.excludedTypes = types
         engine.setFolders(roots: roots, excluded: excluded, excludedTypes: types)
+        people.foldersChanged()
     }
 
     func removeFolder(_ root: URL) {

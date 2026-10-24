@@ -198,6 +198,7 @@ final class QuickLookWindow: NSWindow, QLPreviewPanelDataSource {
 /// The window's query: keyword and meaning results together after a short pause in typing, optionally of one kind.
 @Observable
 final class SearchModel {
+    var personContext: PersonQuery { engine.personQuery(query) }
     var query = "" {
         didSet { if query != oldValue { run() } }
     }
@@ -412,6 +413,7 @@ struct SearchWindowView: View {
             .padding(.leading, 78)   // beside the window buttons
             .frame(height: 52)
             KindFilters(search: search, showsCode: model.hasCode)
+            if !search.isCode { PersonSearchContext(context: search.personContext) }
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 10)

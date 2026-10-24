@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP_NAME="DigUp"
+APP_NAME="DigUp People"
 # ".noindex" keeps Spotlight (and the Apps list) from showing this staging copy.
 APP="build.noindex/$APP_NAME.app"
 
@@ -23,6 +23,7 @@ fi
 
 # llama.cpp, the embedding runtime, linked into the helper (only rebuilt when its tag or patch changes).
 scripts/build-llama.sh
+bash scripts/fetch-face-model.sh
 
 # Both executables: the app, and the `digup` CLI, which the app runs as its indexing helper and query encoder.
 swift build -c release --product DigUpApp
@@ -45,6 +46,8 @@ xcrun actool --compile "$APP/Contents/Resources" --platform macosx --target-devi
   --development-region en "$PWD/Resources/AppIcon/AppIcon.icon" > /dev/null
 cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"   # over actool's plainer fallback: ours has simplified 16 and 32 px
 cp Resources/Acknowledgements.txt "$APP/Contents/Resources/Acknowledgements.txt"
+cp Vendor/faces/sface.onnx "$APP/Contents/Resources/sface.onnx"
+cat Resources/SFace-LICENSE.txt .build/checkouts/onnxruntime-swift-package-manager/LICENSE >> "$APP/Contents/Resources/Acknowledgements.txt"
 cp Resources/AppIcon/tray.png Resources/AppIcon/tray-dim.png Resources/AppIcon/tray-paused.png "$APP/Contents/Resources/"   # the menubar's logo
 
 # Sparkle (in-app updates): the framework in Frameworks/, where the app's runpath looks. Its XPC services are for
@@ -55,6 +58,12 @@ ditto .build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sp
 for part in XPCServices Headers PrivateHeaders Modules; do rm -rf "${FW:?}/$part" "${FW:?}/Versions/B/$part"; done
 
 PLIST="$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier local.iqbal.DigUpPeople" "$PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName DigUp People" "$PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName DigUp People" "$PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $APP_NAME" "$PLIST"
+# A personal fork must not install an upstream update over its people-enabled build.
+/usr/libexec/PlistBuddy -c "Delete :SUFeedURL" "$PLIST" 2>/dev/null || true
 [[ -n "${BUNDLE_ID:-}" ]] && /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$PLIST"
 [[ -n "${VERSION:-}" ]] && /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
 [[ -n "${BUILD_NUMBER:-}" ]] && /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$PLIST"

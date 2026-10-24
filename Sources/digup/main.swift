@@ -368,12 +368,15 @@ func search(_ args: Arguments) throws {
     let store = try IndexStore(directory: args.indexFolder, file: code == nil ? IndexStore.mainFile : IndexStore.codeFile)
     let searcher = try Searcher(store: store)
     let started = Date()
-    let vector = try queryVectors([query], store: store, searcher: searcher,
+    let context = code == nil ? try PeopleStore(store: store).resolve(query) : nil
+    let personFiles = try context.flatMap { $0.people.isEmpty ? nil : try PeopleStore(store: store).fileIDs(for: $0.people.map(\.id)) }
+    if context?.people.isEmpty == false { query = context!.remainder }
+    let vector = try queryVectors(query.isEmpty ? [] : [query], store: store, searcher: searcher,
                                   prompt: code == nil ? Prompts.query : Prompts.codeQuery)?.first
     let encoded = Date()
     let hits = try searcher.search(query, queryVector: vector, kinds: try args.kinds(),
                                    limit: args.values["-n"].flatMap(Int.init) ?? 10, zGate: args.zGate,
-                                   wordWeight: args.wordWeight)
+                                   wordWeight: args.wordWeight, fileIDs: personFiles)
     let searched = Date()
     if args.flags.contains("--json") {
         let rows = hits.map(hitFields)
@@ -695,6 +698,13 @@ do {
         print(usage)
         exit(0)
     }
+    #if os(macOS)
+    if ["face-detect", "face-index", "face-embed-aligned"].contains(command) {
+        ParentWatch.start()
+        try faceService(command, raw: Array(raw.dropFirst()))
+        exit(0)
+    }
+    #endif
     let args = try Arguments(raw.dropFirst())
     if ["index-service", "worker", "search-service", "download-model"].contains(command)
         || command == "estimate" && args.flags.contains("--json") {

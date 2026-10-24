@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 TB="${TESTBED:-$HOME/DigUpTestbed}"
 INDEX="${INDEX:-$PWD/.dev/app-index}"
 MODELS="${MODELS:-$PWD/.dev/models}"
-SUITE="${SUITE:-com.abdurrahim.DigUp.dev}"
+SUITE="${SUITE:-local.iqbal.DigUpPeople.dev}"
 
 # The model, cloned from the Hugging Face cache (APFS clones take no extra space), unless MODELS points elsewhere.
 SNAPSHOT="$HOME/.cache/huggingface/hub/models--ggml-org--embeddinggemma-2-GGUF/snapshots/bfcd298762cc34d0357ece5ebdd31791a3a374d8"
@@ -23,8 +23,8 @@ if [[ "$MODELS" == "$PWD/.dev/models" ]]; then
 fi
 
 # Only an earlier run of this same copy is stopped: an installed DigUp in use keeps running.
-APP="${APP:-build.noindex/DigUp.app}"
-EXE="$(cd "$APP" && pwd -P)/Contents/MacOS/DigUp"
+APP="${APP:-build.noindex/DigUp People.app}"
+EXE="$(cd "$APP" && pwd -P)/Contents/MacOS/DigUp People"
 for pid in $(pgrep -x DigUp); do
   [[ "$(ps -o comm= -p "$pid")" == "$EXE" ]] && kill "$pid" && sleep 0.5
 done

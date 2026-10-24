@@ -8,6 +8,7 @@ struct SearchPanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if !controller.isCode { PersonSearchContext(context: controller.personContext).padding(.horizontal, 20) }
             if controller.phase != .empty {
                 Divider()
                 content

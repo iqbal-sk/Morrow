@@ -56,8 +56,12 @@ let appProducts: [Product] = [.executable(name: "DigUpApp", targets: ["DigUpApp"
 let appDependencies: [Package.Dependency] = [
     // In-app updates (the app only). build.sh embeds the framework in Contents/Frameworks and signs it.
     .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
+    .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", exact: "1.24.2"),
 ]
+let faceDependencies: [Target.Dependency] = ["FaceRuntime"]
 let appTargets: [Target] = [
+    .target(name: "FaceRuntime", dependencies: ["DigUpKit", .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")]),
+    .testTarget(name: "FaceRuntimeTests", dependencies: ["FaceRuntime", "DigUpKit"]),
     // The menubar + hotkey app. build.sh wraps it into build.noindex/DigUp.app. (The product can't be called
     // "DigUp": on a case-insensitive disk it would collide with the `digup` CLI binary.)
     .executableTarget(
@@ -70,6 +74,7 @@ let appTargets: [Target] = [
 #else
 let appProducts: [Product] = []
 let appDependencies: [Package.Dependency] = []
+let faceDependencies: [Target.Dependency] = []
 let appTargets: [Target] = []
 #endif
 
@@ -90,7 +95,7 @@ let package = Package(
         .target(name: "LlamaRuntime", dependencies: ["CLlama", "DigUpKit"], linkerSettings: llamaLink),
         // Developer CLI: estimate / index / search / status / eval. Doubles as the eval harness, and the app runs it as
         // its indexing helper and its query encoder.
-        .executableTarget(name: "digup", dependencies: ["DigUpKit", "LlamaRuntime"]),
+        .executableTarget(name: "digup", dependencies: ["DigUpKit", "LlamaRuntime"] + faceDependencies),
         // Pictures/ holds ImageTests' pictures (scripts/testbed/make_test_pictures.swift) and Videos/ VideoTests' video,
         // read by path.
         .testTarget(name: "DigUpKitTests", dependencies: ["DigUpKit"] + testDependencies, exclude: ["Pictures", "Videos"]),
