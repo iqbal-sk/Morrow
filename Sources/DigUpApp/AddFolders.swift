@@ -37,7 +37,7 @@ final class AddFoldersController {
         // Snapshot runs never put an open panel on screen (-debugChoices picks folders instead).
         guard suggestions.isEmpty, !AppController.offscreen else { return present(choices, on: window) }
         app.pickFolders(for: window) { [weak self] picked in
-            guard let self else { return }
+            guard let self, self.choices === choices else { return }
             guard !picked.isEmpty else {
                 self.choices = nil
                 return
@@ -52,7 +52,7 @@ final class AddFoldersController {
                                   pick: { [weak self] in self?.pick() },
                                   cancel: { [weak self] in self?.end() },
                                   add: { [weak self] in self?.add() })
-        let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
+        let sheet = NSWindow(contentViewController: NSHostingController(rootView: view.morrowTheme()))
         sheet.styleMask = [.titled]
         sheet.title = code ? "Code Folders" : "Add Folders"
         self.sheet = sheet
@@ -107,11 +107,11 @@ private struct AddFoldersView: View {
                 if choices.code {
                     StepTitle(title: "Search your code",
                               subtitle: "Pick the folders that hold your projects; open one to pick among its repos. "
-                                  + "DigUp reads each once, then what changes. Code is searched on its own: type "
+                                  + "Morrow reads each once, then what changes. Code is searched on its own: type "
                                   + "code: in the search panel.")
                 } else {
                     StepTitle(title: "Add folders to search",
-                              subtitle: "DigUp reads a new folder once, then keeps up with what changes in it. "
+                              subtitle: "Morrow reads a new folder once, then keeps up with what changes in it. "
                                   + "Open a folder to pick some of its subfolders.")
                 }
                 ScrollView {
@@ -133,6 +133,7 @@ private struct AddFoldersView: View {
                 Button("Cancel", action: cancel)
                     .keyboardShortcut(.cancelAction)
                 Button("Add", action: add)
+                    .morrowAction(.primary)
                     .keyboardShortcut(.defaultAction)
                     .disabled(!choices.changesSomething)
             }

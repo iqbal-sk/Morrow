@@ -124,6 +124,9 @@ struct PreviewPane: View {
     let row: ResultRow
     /// The picture's box.
     let imageSize: CGSize
+    /// Known people used to filter this result, showing how the search reaches the source file.
+    var matchedPeople: [String] = []
+    var personOnly = false
     /// A double-click on the picture or passage: the file in its app, like Open.
     var open: () -> Void = {}
 
@@ -146,14 +149,29 @@ struct PreviewPane: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .help("Show in Finder")
+                if !matchedPeople.isEmpty {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.crop.rectangle.stack").foregroundStyle(Brand.accent)
+                        Text(matchedPeople.joined(separator: " + ")).fontWeight(.medium).lineLimit(1)
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
+                        Text("person match").foregroundStyle(.secondary)
+                    }
+                    .font(.system(size: 11))
+                    .padding(.horizontal, 9).padding(.vertical, 7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Matched people: \(matchedPeople.joined(separator: ", ")). This file matched the person search.")
+                }
                 Text(row.details)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             .padding(.top, 12)
-            WhyItMatched(row: row)
-                .padding(.top, 12)
+            if !personOnly {
+                WhyItMatched(row: row).padding(.top, 12)
+            }
             Spacer(minLength: 0)
         }
     }
@@ -167,10 +185,13 @@ struct PreviewActions: View {
     var controlSize: ControlSize = .regular
 
     var body: some View {
-        HStack(spacing: 8) {
-            Button(row.openTitle, action: open)
-                .keyboardShortcut(.defaultAction)
-            Button("Show in Finder", action: reveal)
+        MorrowGlassGroup {
+            HStack(spacing: 8) {
+                Button(row.openTitle, action: open)
+                    .morrowAction(.primary)
+                    .keyboardShortcut(.defaultAction)
+                Button("Show in Finder", action: reveal).morrowAction()
+            }
         }
         .controlSize(controlSize)
     }
@@ -244,7 +265,9 @@ struct PreviewPicture: View {
             image = Previews.shared.cached(row, side: side)
             loaded = image != nil
             if image == nil {
-                image = await Previews.shared.load(row, side: side, scale: scale)
+                let picture = await Previews.shared.load(row, side: side, scale: scale)
+                guard !Task.isCancelled else { return }
+                image = picture
                 loaded = true
             }
         }
@@ -386,7 +409,12 @@ struct Passage: View {
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.12),
                                                                                     lineWidth: 0.5))
         .shadow(color: .black.opacity(0.15), radius: 5, y: 2)
-        .task(id: row.previewKey) { text = await Previews.shared.passage(row.segmentID, false) }
+        .task(id: row.previewKey) {
+            text = nil
+            let passage = await Previews.shared.passage(row.segmentID, false)
+            guard !Task.isCancelled else { return }
+            text = passage
+        }
     }
 
     /// "Part 2 of 5", when the document has more than one.
@@ -451,7 +479,7 @@ struct CodeLines: View {
                         }
                         .padding(.vertical, 0.5)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(isFocus(offset) ? Brand.amber.opacity(0.16) : Color.clear)
+                        .background(isFocus(offset) ? Brand.accent.opacity(0.16) : Color.clear)
                         .id(offset)
                     }
                 }
@@ -471,7 +499,12 @@ struct CodeLines: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.1),
                                                                                     lineWidth: 0.5))
-        .task(id: row.previewKey) { text = await Previews.shared.passage(row.segmentID, true) }
+        .task(id: row.previewKey) {
+            text = nil
+            let passage = await Previews.shared.passage(row.segmentID, true)
+            guard !Task.isCancelled else { return }
+            text = passage
+        }
     }
 
     private var lines: [String] {

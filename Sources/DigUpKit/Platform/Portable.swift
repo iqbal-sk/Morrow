@@ -40,25 +40,25 @@ extension Data {
     }
 }
 
-/// Where DigUp keeps its own files on each OS: the model and the index.
+/// Where Morrow keeps its own files on each OS: the model and the index.
 public enum AppPaths {
-    /// macOS personal build: ~/Library/Application Support/DigUp People. Windows: %LOCALAPPDATA%\DigUp. Linux: $XDG_DATA_HOME/digup, or
-    /// ~/.local/share/digup.
+    /// macOS: ~/Library/Application Support/Morrow. Windows: %LOCALAPPDATA%\Morrow. Linux: $XDG_DATA_HOME/morrow, or
+    /// ~/.local/share/morrow.
     public static var applicationSupport: URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let environment = ProcessInfo.processInfo.environment
         #if os(macOS)
-        return home.appendingPathComponent("Library/Application Support/DigUp People")
+        return home.appendingPathComponent("Library/Application Support/Morrow")
         #elseif os(Windows)
         if let local = environment["LOCALAPPDATA"], !local.isEmpty {
-            return URL(fileURLWithPath: local).appendingPathComponent("DigUp")
+            return URL(fileURLWithPath: local).appendingPathComponent("Morrow")
         }
-        return home.appendingPathComponent("AppData/Local/DigUp")
+        return home.appendingPathComponent("AppData/Local/Morrow")
         #else
         if let data = environment["XDG_DATA_HOME"], !data.isEmpty {
-            return URL(fileURLWithPath: data).appendingPathComponent("digup")
+            return URL(fileURLWithPath: data).appendingPathComponent("morrow")
         }
-        return home.appendingPathComponent(".local/share/digup")
+        return home.appendingPathComponent(".local/share/morrow")
         #endif
     }
 

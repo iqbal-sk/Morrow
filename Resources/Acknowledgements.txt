@@ -1,8 +1,8 @@
-DigUp includes code from these projects. Thank you.
+Morrow includes code from these projects. Thank you.
 
 ================================================================================
 llama.cpp and ggml (https://github.com/ggml-org/llama.cpp), the embedding runtime,
-linked into DigUp's helper (with one small change, in scripts/llama.cpp-no-logits.patch)
+linked into Morrow's helper (with one small change, in scripts/llama.cpp-no-logits.patch)
 ================================================================================
 
 MIT License
@@ -40,7 +40,7 @@ public domain (The Unlicense, http://unlicense.org).
 SHA-256 by Igor Pavlov: public domain.
 
 ================================================================================
-Sparkle (https://sparkle-project.org), DigUp's updater, in Contents/Frameworks:
+Sparkle (https://sparkle-project.org), Morrow's optional updater framework, in Contents/Frameworks:
 its license, with those of the code it includes, as Sparkle ships them
 ================================================================================
 
@@ -185,5 +185,5 @@ The model
 
 EmbeddingGemma 2 by Google, in ggml-org's GGUF conversion
 (https://huggingface.co/ggml-org/embeddinggemma-2-GGUF), is released under the
-Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0). DigUp doesn't
+Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0). Morrow doesn't
 include it: the app downloads it from Hugging Face the first time it runs.

@@ -1,4 +1,4 @@
-// Standalone experiment helper. Does not open or migrate DigUp's index.
+// Standalone experiment helper. Does not open or migrate Morrow's index.
 import Foundation
 import Vision
 import ImageIO

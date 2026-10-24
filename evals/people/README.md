@@ -1,6 +1,6 @@
 # Local face matching evaluation
 
-This experiment compares identity matching before changing DigUp's production index.
+This experiment evaluates identity matching for Morrow before treating it as production-ready.
 
 The paths are:
 
@@ -45,7 +45,7 @@ Requires full Xcode and `uv`. Dependencies are isolated from DigUp's embedding w
 uv run --python 3.12 scripts/people-eval.py --dataset ~/Desktop/DigUp-Face-Test
 ```
 
-The evaluator uses the installed `digup worker` helper and the existing local model files at `~/Library/Application Support/DigUp/Models`. If needed, supply `--gemma-helper /path/to/DigUp.app/Contents/Helpers/digup`. `--without-gemma` explicitly selects only the CV baselines. The index itself is never opened or modified.
+The evaluator uses the installed `digup worker` helper and Morrow's local model files at `~/Library/Application Support/Morrow/Models`. If needed, supply `--gemma-helper /path/to/Morrow.app/Contents/Helpers/digup`. `--without-gemma` explicitly selects only the CV baselines. The app index is never opened or modified.
 
 All images are orientation-normalized to a maximum of 1,600 pixels before the comparison. Gemma defaults to the app's photo budget of 140 visual tokens; `--gemma-budget 280` permits a second run with more image detail and the same deterministic data split. The app defaults to 280 for screenshots; compare budgets explicitly when evaluating screenshot retrieval.
 

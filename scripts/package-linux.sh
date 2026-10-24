@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds DigUp for Linux as a .deb and an AppImage: the Tauri shell (shell/), with DigUp's helper, llama.cpp, PDFium and
+# Builds Morrow for Linux as a .deb and an AppImage: the Tauri shell (shell/), with its search helper, llama.cpp, PDFium and
 # ffmpeg inside. Run it on the CPU architecture the packages are for, after scripts/fetch-vendor.sh and
 # scripts/build-llama.sh. Needs Swift, Rust, Tauri's CLI (`cargo install tauri-cli --version "^2"`, else Node runs it from
 # npm), patchelf, GStreamer's plugins for the AppImage (gstreamer1.0-plugins-base, -plugins-good, -gl and -alsa), and
@@ -80,14 +80,13 @@ resources='{"helper/":"helper/","THIRD-PARTY-NOTICES.txt":"THIRD-PARTY-NOTICES.t
   "{\"bundle\":{\"resources\":$resources$signing,\"linux\":{\"appimage\":{\"files\":{$docs}}}}}")
 rm -rf "$gstreamer"
 
-# Packed again with xz (Tauri's gzip makes it 51 MB, xz 32). Its name stays "dig-up" (Tauri's spelling of the product's
-# name): Debian and Ubuntu already have a "digup" (a digest updating tool), which would replace DigUp at the next update.
+# Packed again with xz (Tauri's gzip makes it 51 MB, xz 32).
 deb=$(ls shell/src-tauri/target/release/bundle/deb/*.deb)
 repack=$(mktemp -d)
 chmod 755 "$repack"   # the package's root: mktemp's 700 would ship as /'s mode
 dpkg-deb -R "$deb" "$repack"
-mkdir -p "$repack/usr/share/doc/dig-up"
-cp shell/src-tauri/THIRD-PARTY-NOTICES.txt "$repack/usr/share/doc/dig-up/copyright"   # where Debian looks for it
+mkdir -p "$repack/usr/share/doc/morrow"
+cp shell/src-tauri/THIRD-PARTY-NOTICES.txt "$repack/usr/share/doc/morrow/copyright"   # where Debian looks for it
 # A beta's version as Debian sorts it before the release: 0.7.0~beta.1 (Debian reads 0.7.0-beta.1 as 0.7.0's revision
 # beta.1, newer than 0.7.0 itself).
 sed -i -E 's/^(Version: [0-9]+\.[0-9]+\.[0-9]+)-/\1~/' "$repack/DEBIAN/control"

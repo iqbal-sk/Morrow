@@ -209,7 +209,7 @@ enum DebugHooks {
             $0.trimmingCharacters(in: .whitespaces)
         } ?? []
         if !keys.isEmpty {
-            panel.pasteboard = NSPasteboard(name: NSPasteboard.Name("com.abdurrahim.DigUp.debug"))
+            panel.pasteboard = NSPasteboard(name: NSPasteboard.Name("com.iqbal.morrow.debug"))
             panel.pasteboard.clearContents()
         }
         let typed = defaults.string(forKey: "debugType")?.split(separator: "|").map(String.init) ?? []
@@ -350,9 +350,11 @@ enum DebugHooks {
             default:
                 app.showSearchWindow(query: defaults.string(forKey: "debugQuery") ?? "")
                 let search = app.searchWindow.search
+                if let destination = WorkspaceDestination(rawValue: parts[0]) { search.destination = destination }
+                if parts[0] == "browse" { search.browse(folder: defaults.string(forKey: "debugFolder")) }
                 // The field with the cursor, as on screen (an offscreen window doesn't take it by itself).
                 if defaults.bool(forKey: "debugFocus") { DispatchQueue.main.async { search.focusField() } }
-                loaded = { search.query.isEmpty || search.hasResults }
+                loaded = { search.destination != .library || search.showsHome || search.codePhase != nil || search.hasResults }
                 draw = { try app.searchWindow.snapshot(to: $0) }
                 close = { app.searchWindow.close() }
             }
@@ -360,11 +362,34 @@ enum DebugHooks {
                 $0.trimmingCharacters(in: .whitespaces)
             } ?? []
             waitUntil(loaded, deadline: Date().addingTimeInterval(30)) {
+                guard loaded() else {
+                    log("window: \(page) timed out before it was ready")
+                    if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+                    return
+                }
                 log("window: \(page) loaded in \(ms(since: started)) (after a 0.5 s launch delay)")
                 if let list = choices() { act(on: list) }
                 waitUntil({ choices()?.estimatesDone ?? true }, deadline: Date().addingTimeInterval(30)) {
                     whenPicturesSettle {
                         save(page, draw, to: snapshotPath())
+                        if let path = defaults.string(forKey: "debugState") {
+                            let search = app.searchWindow.search
+                            let state: [String: Any] = [
+                                "requestedPage": page,
+                                "destination": search.destination.rawValue,
+                                "query": search.query,
+                                "browsing": search.browsing,
+                                "contentState": String(describing: search.contentState(hasFolders: app.model.hasFolders)),
+                                "hasResults": search.hasResults,
+                                "rows": search.rows.count,
+                                "settingsTab": app.settingsWindow.selectedTab.rawValue,
+                                "onboardingStep": app.onboarding.map { String(describing: $0.state.step) } ?? ""
+                            ]
+                            do {
+                                try JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys])
+                                    .write(to: URL(fileURLWithPath: path))
+                            } catch { log("snapshot state failed: \(error)") }
+                        }
                         if let list = choices() { log("choices: \(describe(list))") }
                         if defaults.bool(forKey: "debugAdd"), app.settingsWindow.addSheet.isOpen {
                             app.settingsWindow.addSheet.add()
@@ -676,7 +701,7 @@ enum DebugHooks {
 
     /// The menu's header view, as it would show if the menu opened now.
     private static func drawMenuHeader(_ app: AppController, to url: URL) {
-        let view = NSHostingView(rootView: MenuStatusView(model: app.model))
+        let view = NSHostingView(rootView: MenuStatusView(model: app.model, people: app.people))
         view.frame.size = view.fittingSize
         let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view

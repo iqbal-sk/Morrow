@@ -51,6 +51,31 @@ import WinSDK
         #expect(try store.prune(keepingUnder: []) == 2)
     }
 
+    @Test func deletingIndexedFilesIsScopedToTheDirectoryAndRemovesDerivedRows() throws {
+        let store = try IndexStore(directory: folder)
+        let first = try store.insert(file("/photos/trip/one.png", inode: 1))
+        let second = try store.insert(file("/photos/trip/day-two/two.png", inode: 2))
+        try store.insert(file("/photos/trip-old/keep.png", inode: 3))
+        for id in [first, second] {
+            try store.db.run("INSERT INTO segments(file, kind, modality, excerpt) VALUES(?, 'chunk', 'none', 'derived')",
+                             [.int(id)])
+        }
+
+        #expect(try store.deleteIndexedFiles(under: "/photos/trip") == 2)
+        #expect(try store.files(under: ["/photos/trip"]).isEmpty)
+        #expect(try store.files(under: ["/photos/trip-old"]).map(\.path) == ["/photos/trip-old/keep.png"])
+        var segments = 0, keywords = 0
+        try store.db.query("SELECT COUNT(*) FROM segments") { segments = Int($0.int(0)) }
+        try store.db.query("SELECT COUNT(*) FROM fts") { keywords = Int($0.int(0)) }
+        #expect(segments == 1) // only the sibling's filename row remains
+        #expect(keywords == 1)
+
+        #expect(try store.deleteIndexedFiles() == 1)
+        #expect(try store.files(under: ["/photos"]).isEmpty)
+        try store.db.query("SELECT COUNT(*) FROM fts") { keywords = Int($0.int(0)) }
+        #expect(keywords == 0)
+    }
+
     @Test func scopeLimitsWhatIsWaiting() throws {
         let store = try IndexStore(directory: folder)
         try store.insert(file("/a/x.png", inode: 1))

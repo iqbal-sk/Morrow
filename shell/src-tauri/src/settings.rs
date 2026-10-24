@@ -1,5 +1,5 @@
-//! What the person chose: the folders DigUp searches, what it skips in them, the hotkey, and whether setup is done. A
-//! JSON file in the app's config folder (%APPDATA%\com.abdurrahim.DigUp on Windows, ~/.config/com.abdurrahim.DigUp on
+//! What the person chose: the folders Morrow searches, what it skips in them, the hotkey, and whether setup is done. A
+//! JSON file in the app's config folder (%APPDATA%\com.iqbal.morrow on Windows, ~/.config/com.iqbal.morrow on
 //! Linux). Launch arguments (`--roots`, `--hotkey`) stand in for it in dev runs.
 
 use crate::hours::Hours;
@@ -40,7 +40,7 @@ pub struct Settings {
     /// The model runs on the processor even where the graphics card measured faster (Settings → General): for a card
     /// whose results come back wrong or empty. The helpers get `DIGUP_DEVICE=cpu`.
     pub processor_only: bool,
-    /// When DigUp last checked for updates (seconds since 1970).
+    /// When Morrow last checked for updates (seconds since 1970).
     pub update_checked: u64,
 }
 

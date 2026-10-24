@@ -21,15 +21,33 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
 
     var isVisible: Bool { window?.isVisible == true }
 
-    func show(query: String? = nil, kind: ResultGroupKind? = nil) {
+    func show(query: String? = nil, kind: ResultGroupKind? = nil, destination: WorkspaceDestination? = nil) {
+        // Menu commands and routes from Settings must respect the same modal boundary as keys.
+        // Do not replace the view underneath a person/reference editor or confirmation sheet.
+        if let window = self.window, window.attachedSheet != nil {
+            app.present(window)
+            return
+        }
         let window = self.window ?? makeWindow()
         if let query {
-            search.filter = kind
-            search.query = query
+            search.search(for: query, kind: kind)
+        } else if let destination {
+            search.navigate(to: destination)
         }
         app.present(window)
-        if !AppController.offscreen { window.makeFirstResponder(search.field) }
+        if !AppController.offscreen, search.destination == .library {
+            DispatchQueue.main.async { self.search.focusField() }
+        }
         installKeyMonitor()
+    }
+
+    func find() {
+        guard window?.attachedSheet == nil else {
+            if let window { app.present(window) }
+            return
+        }
+        search.activateSearch()
+        show()
     }
 
     func close() {
@@ -37,33 +55,30 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
     }
 
     private func makeWindow() -> QuickLookWindow {
-        let window = QuickLookWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 700),
+        let window = QuickLookWindow(contentRect: NSRect(x: 0, y: 0, width: 1240, height: 800),
                                      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                      backing: .buffered, defer: false)
-        // An empty unified toolbar makes the title bar tall enough for the search field to sit beside the window
-        // buttons.
-        window.toolbar = NSToolbar(identifier: "DigUpSearch")
+        // SwiftUI owns the native toolbar actions; search stays in the persistent workspace header.
+        window.toolbar = NSToolbar(identifier: "MorrowSearch")
         window.toolbarStyle = .unified
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        window.title = "DigUp"
-        window.minSize = NSSize(width: 820, height: 520)
+        window.title = "Morrow"
+        window.minSize = NSSize(width: 1000, height: 640)
         window.isReleasedWhenClosed = false
         window.delegate = self
         // The frame is remembered in the app's real defaults, so dev runs (their own -defaultsSuite) don't keep it.
         if UserDefaults.standard.string(forKey: "defaultsSuite") == nil {
-            window.setFrameAutosaveName("DigUpSearchWindow")
+            window.setFrameAutosaveName("MorrowSearchWindow")
         }
-        window.contentView = NSHostingView(rootView: SearchWindowView(search: search, model: app.model, app: app))
+        window.contentView = NSHostingView(rootView: MorrowWorkspace(search: search, app: app))
         if window.frame.origin == .zero { window.center() }
         self.window = window
         return window
     }
 
     func windowWillClose(_ notification: Notification) {
-        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
-            QLPreviewPanel.shared().orderOut(nil)
-        }
+        if ownsVisibleQuickLook { QLPreviewPanel.shared().orderOut(nil) }
         removeKeyMonitor()
         PreviewPlayback.shared.stop()
         window?.contentView = nil
@@ -104,11 +119,23 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
     /// Arrows move through the grid (← → only once you've arrowed, so they still move the cursor while you type),
     /// ↩ opens, ⌘↩ reveals, Space previews, ⌘C copies, Esc closes the preview or clears the search.
     private func handle(_ event: NSEvent) -> Bool {
+        guard window?.attachedSheet == nil else { return false }
         // An input method is composing (Japanese, Chinese…): ↩, the arrows and Esc are its keys until it's done.
         if (search.field?.currentEditor() as? NSTextView)?.hasMarkedText() == true { return false }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .numericPad, .function])
-        let previewing = QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible
+        if event.keyCode == 3, modifiers == .command { // ⌘F always returns to the library query.
+            find()
+            return true
+        }
+        if modifiers == [.command, .shift], let index = [18, 19, 20].firstIndex(of: Int(event.keyCode)) {
+            search.navigate(to: WorkspaceDestination.allCases[index])
+            return true
+        }
+        guard search.destination == .library, window?.attachedSheet == nil else { return false }
+        // A native source list owns its arrows; result navigation must not steal them.
+        if window?.firstResponder is NSTableView { return false }
+        let previewing = ownsVisibleQuickLook
         switch event.keyCode {
         case 125, 126:   // ↓ ↑
             guard modifiers.isEmpty else { return false }
@@ -143,7 +170,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             if previewing {
                 QLPreviewPanel.shared().orderOut(nil)
             } else if !search.query.isEmpty {
-                search.query = ""
+                search.clearQuery()
             } else {
                 return false
             }
@@ -154,9 +181,14 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
         return true
     }
 
+    private var ownsVisibleQuickLook: Bool {
+        QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible
+            && QLPreviewPanel.shared().dataSource === window
+    }
+
     func toggleQuickLook() {
         let panel = QLPreviewPanel.shared()!
-        if QLPreviewPanel.sharedPreviewPanelExists(), panel.isVisible {
+        if ownsVisibleQuickLook {
             panel.orderOut(nil)
         } else if search.selectedRow != nil {
             updateQuickLook()
@@ -195,306 +227,110 @@ final class QuickLookWindow: NSWindow, QLPreviewPanelDataSource {
     }
 }
 
-/// The window's query: keyword and meaning results together after a short pause in typing, optionally of one kind.
-@Observable
-final class SearchModel {
-    var personContext: PersonQuery { engine.personQuery(query) }
-    var query = "" {
-        didSet { if query != oldValue { run() } }
-    }
-    var filter: ResultGroupKind? {
-        didSet { if filter != oldValue { run() } }
-    }
-    private(set) var results = ResultSet.empty
-    /// Results per kind for the query, whatever the filter (the counts on the kind buttons).
-    private(set) var counts: [ResultGroupKind: Int] = [:]
-    private(set) var hasResults = false
-    /// What the window shows instead of results: "code:" alone (what to type), or code search that's off.
-    private(set) var codePhase: SearchPhase?
-    var selection: String?
-    var showWeaker = false
-    var showsPreview = true
-    /// You moved the selection with the arrow keys since the last edit: Space and ← → act on results then.
-    private(set) var navigated = false
-    /// The grid's columns right now (↑ ↓ move by a row).
-    var columns = 4
-    @ObservationIgnored weak var field: NSTextField?
-    @ObservationIgnored private let engine: Engine
-    @ObservationIgnored private var generation = 0
-    @ObservationIgnored private var task: Task<Void, Never>?
-
-    init(engine: Engine) {
-        self.engine = engine
-    }
-
-    /// Every result shown, in order (strong ones, then the weaker ones once they're unfolded).
-    var rows: [ResultRow] { results.ranked + (showWeaker ? results.weaker : []) }
-
-    /// A search of code: the Code filter, or "code:" typed.
-    var isCode: Bool { filter == .code || CodeQuery.text(of: query) != nil }
-    var selectedRow: ResultRow? { rows.first { $0.id == selection } ?? rows.first }
-
-    /// A click on a result: like the arrow keys, it makes Space and ← → act on the results.
-    func select(_ row: ResultRow) {
-        selection = row.id
-        navigated = true
-    }
-
-    /// A click in the search field: keys are the text's again.
-    func editing() {
-        navigated = false
-    }
-
-    /// Puts the cursor in the search field (a click on the empty window lands there).
-    func focusField() {
-        guard let field, field.currentEditor() == nil else { return }
-        field.window?.makeFirstResponder(field)
-    }
-
-    /// The file in its app, at the page or moment that matched when the app can be told where.
-    func open(_ row: ResultRow) {
-        engine.open(row)
-    }
-
-    func move(by step: Int) {
-        let ids = rows.map(\.id)
-        guard !ids.isEmpty else { return }
-        let index = selection.flatMap { ids.firstIndex(of: $0) } ?? -1
-        selection = ids[max(0, min(ids.count - 1, index + step))]
-        navigated = true
-    }
-
-    private func run() {
-        generation += 1
-        let current = generation
-        task?.cancel()
-        navigated = false
-        let typed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let code = isCode
-        let text = CodeQuery.text(of: typed) ?? typed
-        codePhase = nil
-        guard !typed.isEmpty else {
-            results = .empty
-            counts = [:]
-            hasResults = false
-            return
-        }
-        if code, !engine.hasCode || text.isEmpty {
-            results = .empty
-            counts = [:]
-            hasResults = false
-            codePhase = engine.hasCode ? .codeHint : .codeOff
-            return
-        }
-        engine.prewarm()
-        engine.embedAhead(text, code: code)
-        let filter = self.filter
-        let showAt = ContinuousClock.now + SearchPanelController.typingPause
-        if code {
-            task = Task {
-                let vector = await engine.embedQuery(text, code: true)
-                guard !Task.isCancelled, current == generation else { return }
-                let hits = await engine.search(text, vector: vector, prefixLast: false, limit: 120, code: true)
-                try? await Task.sleep(until: showAt, tolerance: .milliseconds(1), clock: .continuous)
-                guard !Task.isCancelled, current == generation else { return }
-                counts = [.code: Searcher.strongCount(hits)]
-                results = ResultSet(hits, query: text)
-                showWeaker = false
-                if !rows.contains(where: { $0.id == selection }) { selection = rows.first?.id }
-                hasResults = true
-                log("window: code \"\(text)\": \(results.ranked.count) results + \(results.weaker.count) weaker")
-            }
-            return
-        }
-        task = Task {
-            let vector = await engine.embedQuery(text)
-            guard !Task.isCancelled, current == generation else { return }
-            let all = await engine.search(text, vector: vector, prefixLast: false, limit: 120)
-            let shown = filter == nil ? all : await engine.search(text, vector: vector, prefixLast: false,
-                                                                    kinds: filter!.kinds, limit: 120)
-            try? await Task.sleep(until: showAt, tolerance: .milliseconds(1), clock: .continuous)
-            guard !Task.isCancelled, current == generation else { return }
-            var counts: [ResultGroupKind: Int] = [:]
-            for hit in all.prefix(Searcher.strongCount(all)) { counts[ResultGroupKind(hit.kind), default: 0] += 1 }
-            self.counts = counts
-            results = ResultSet(shown, query: text)
-            showWeaker = false
-            if !rows.contains(where: { $0.id == selection }) { selection = rows.first?.id }
-            hasResults = true
-            log("window: \"\(text)\"\(filter.map { " in \($0.title)" } ?? ""): \(results.ranked.count) results "
-                + "+ \(results.weaker.count) weaker")
-        }
-    }
-}
-
 // MARK: Views
 
 struct SearchWindowView: View {
     @Bindable var search: SearchModel
     let model: AppModel
     let app: AppController
-    @State private var fieldFocused = false
 
     var body: some View {
+        if search.hostsPreviewInspector, model.hasFolders || search.isCode {
+            resultBody.inspector(isPresented: $search.showsPreview) {
+                inspectorContent
+                    .inspectorColumnWidth(min: 280, ideal: 324, max: 420)
+            }
+        } else {
+            resultBody
+        }
+    }
+
+    private var resultBody: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            HStack(spacing: 0) {
-                content
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if search.showsPreview, let row = search.selectedRow, search.hasResults {
-                    Divider()
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 14) {
-                            PreviewPane(row: row, imageSize: CGSize(width: 292, height: 230),
-                                        open: { search.open(row) })
-                            PreviewActions(row: row, open: { search.open(row) },
-                                           reveal: { NSWorkspace.shared.activateFileViewerSelecting([row.url]) })
-                        }
-                        .padding(16)
-                    }
-                    .frame(width: 324)
-                    .background(Color.primary.opacity(0.025))
-                }
-            }
-            Divider()
-            statusBar
+            content.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .ignoresSafeArea(.container, edges: .top)
-        .frame(minWidth: 820, minHeight: 520)
+        // Window minimums belong to the window, not its nested result/inspector panes.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var inspectorContent: some View {
+        Group {
+            if let row = search.selectedRow {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        PreviewPane(row: row, imageSize: CGSize(width: 292, height: 230),
+                                    matchedPeople: search.personContext.people.map(\.name),
+                                    personOnly: !search.personContext.people.isEmpty && search.personContext.remainder.isEmpty,
+                                    open: { search.open(row) })
+                        PreviewActions(row: row, open: { search.open(row) },
+                                       reveal: { NSWorkspace.shared.activateFileViewerSelecting([row.url]) })
+                    }.padding(16)
+                }
+            } else if !search.hasResults {
+                ProgressView("Updating preview…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ContentUnavailableView("No file selected", systemImage: "doc.text.magnifyingglass",
+                                       description: Text("A preview appears when your search finds a file."))
+            }
+        }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                HStack(spacing: 9) {
-                    Image(systemName: search.isCode ? FileKind.code.symbol : "magnifyingglass")
-                        .font(.system(size: search.isCode ? 15 : 17, weight: .semibold))
-                        .foregroundStyle(Brand.gradient)
-                        .frame(width: 22)
-                    SearchField(text: $search.query, fontSize: 18, placeholder: placeholder,
-                                onMake: { search.field = $0 }, onFocus: { fieldFocused = $0 })
-                    if !search.query.isEmpty {
-                        Button {
-                            search.query = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Clear")
-                    }
+            if search.browsing || search.hasQuery || search.isCode {
+                if search.browsing && !search.isCode {
+                    HStack {
+                        Button { search.home() } label: { Label("Library", systemImage: "chevron.left") }.buttonStyle(.borderless)
+                        Text(search.folder.map { ($0 as NSString).lastPathComponent } ?? "Recent files").font(.headline)
+                        Spacer()
+                        Text(search.hasQuery ? "Searching this folder" : "Most recently modified · up to 120 files")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.padding(.vertical, 4)
                 }
-                .padding(.horizontal, 12)
-                .frame(height: 38)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.06)))
-                // Where typing goes, as a Mac text field shows it: a ring in the accent color while it has the cursor.
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.accentColor.opacity(fieldFocused ? 0.6 : 0), lineWidth: 2))
-                .animation(.easeOut(duration: 0.15), value: fieldFocused)
-                Button {
-                    search.showsPreview.toggle()
-                } label: {
-                    Image(systemName: "sidebar.right")
-                        .font(.system(size: 15))
-                        .foregroundStyle(search.showsPreview ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
-                }
-                .buttonStyle(.plain)
-                .help(search.showsPreview ? "Hide Preview" : "Show Preview")
-                Button {
-                    app.showSettings()
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 15))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Settings (⌘,)")
+                KindFilters(search: search, showsCode: model.hasCode)
             }
-            .padding(.leading, 78)   // beside the window buttons
-            .frame(height: 52)
-            KindFilters(search: search, showsCode: model.hasCode)
             if !search.isCode { PersonSearchContext(context: search.personContext) }
         }
         .padding(.horizontal, 14)
-        .padding(.bottom, 10)
+        .padding(.vertical, 8)
     }
 
     @ViewBuilder private var content: some View {
-        if !model.hasFolders {
+        switch search.contentState(hasFolders: model.hasFolders) {
+        case .chooseFolders:
             VStack(spacing: 0) {
                 BrandMark()
                 Text("Choose folders to search").font(.system(size: 20, weight: .bold)).padding(.top, 18)
-                Text("DigUp only looks where you tell it to.")
+                Text("Morrow only looks where you tell it to.")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .padding(.top, 6)
                 Button("Choose Folders…") { app.chooseFolders() }
                     .controlSize(.large)
+                    .morrowAction(.primary)
                     .keyboardShortcut(.defaultAction)
                     .padding(.top, 18)
             }
             .padding(.bottom, 24)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if search.query.trimmingCharacters(in: .whitespaces).isEmpty {
-            SearchHome(search: search, model: model, engine: app.engine)
-        } else if let phase = search.codePhase {
+        case .home:
+            LibraryHome(search: search, app: app)
+        case .codeInstructions(let phase):
             CodeOffOrHint(phase: phase, search: search) { app.chooseCodeFolders() }
-        } else if !search.hasResults {
+        case .loading:
             ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if search.results.isEmpty {
+        case .empty:
             EmptyState(symbol: search.isCode ? FileKind.code.symbol : "magnifyingglass",
-                       title: "No good matches for “\(search.query.trimmingCharacters(in: .whitespaces))”",
+                       title: search.browsing && search.query.isEmpty ? "No searchable files here yet" : "No good matches for “\(search.query.trimmingCharacters(in: .whitespaces))”",
                        message: search.isCode ? "Try saying what the code does, or a name that's in it."
                            : "Try describing what's in it: what you'd see or hear, or words you remember.")
-        } else if search.isCode {
+        case .codeResults:
             CodeResultsList(search: search)
-        } else {
+        case .fileResults:
             ResultsGrid(search: search)
         }
-    }
-
-    private var statusBar: some View {
-        HStack(spacing: 10) {
-            if let progress = model.progress {
-                ProgressView(value: progress).progressViewStyle(.circular).controlSize(.mini)
-            }
-            // What's indexed: a click shows the folders and their progress.
-            Button(model.statusLine) { app.showSettings(.folders) }
-                .buttonStyle(.plain)
-                .lineLimit(1)
-                .help("Folders and indexing")
-            Spacer()
-            if search.hasResults, !search.query.isEmpty {
-                Text(model.resultsCaveat ?? resultCount).lineLimit(1)
-            }
-            if let version = model.updateAvailable {
-                Button {
-                    app.updates.checkNow()
-                } label: {
-                    Label("DigUp \(version) is available", systemImage: "arrow.down.circle.fill")
-                        .foregroundStyle(Brand.ember)
-                }
-                .buttonStyle(.plain)
-                .help("See what's new and update")
-            }
-        }
-        .font(.system(size: 11))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 14)
-        .frame(height: 28)
-    }
-
-    /// Examples of what to type: code's with the Code chip on, and one of them with code search on (as the panel's).
-    private var placeholder: String {
-        if search.filter == .code { return "Describe the code: “retry a request with backoff”, a name in it…" }
-        return model.hasCode ? "Describe it: “zebra in a video”, “code: retry with backoff”…"
-            : "Describe it: “receipt from the hardware store”, “zebra in a video”…"
-    }
-
-    private var resultCount: String {
-        let count = search.results.ranked.count
-        return (count == 1 ? "1 result" : "\(count) results")
-            + (search.results.weaker.isEmpty ? "" : " · \(search.results.weaker.count) weaker")
     }
 }
 
@@ -505,47 +341,59 @@ private struct KindFilters: View {
     var showsCode = false
 
     var body: some View {
-        HStack(spacing: 6) {
-            chip(title: "All", symbol: nil, count: nil, selected: search.filter == nil && !search.isCode) {
-                search.filter = nil
-            }
-            ForEach(ResultGroupKind.files, id: \.self) { kind in
-                chip(title: kind.title, symbol: kind.symbol, count: search.isCode ? nil : search.counts[kind],
-                     selected: search.filter == kind && !search.isCode) {
-                    search.filter = search.filter == kind ? nil : kind
+        ScrollView(.horizontal, showsIndicators: false) {
+            MorrowGlassGroup(spacing: 6) {
+                HStack(spacing: 6) {
+                    filterButton(nil)
+                    ForEach(ResultGroupKind.files, id: \.self) { kind in
+                        filterButton(kind)
+                    }
+                    if showsCode || search.isCode {
+                        filterButton(.code)
+                    }
                 }
-            }
-            if showsCode {
-                Divider().frame(height: 16).padding(.horizontal, 4)
-                chip(title: "Code", symbol: FileKind.code.symbol, count: search.isCode ? search.counts[.code] : nil,
-                     selected: search.isCode, shortcut: 7) {
-                    search.filter = search.filter == .code ? nil : .code
-                }
+                .padding(.vertical, 2)
             }
         }
+        .frame(height: 32)
+        .accessibilityLabel("Filter results by file type")
     }
 
-    private func chip(title: String, symbol: String?, count: Int?, selected: Bool, shortcut: Int? = nil,
-                      action: @escaping () -> Void) -> some View {
-        let number = shortcut ?? (ResultGroupKind.files.firstIndex { $0.title == title }).map { $0 + 2 } ?? 1
-        return Button(action: action) {
+    private func filterButton(_ kind: ResultGroupKind?) -> some View {
+        let title = kind?.title ?? "All"
+        let symbol = kind?.symbol ?? "square.grid.2x2"
+        let selected = kind.map { search.filter == $0 } ?? (search.filter == nil && !search.isCode)
+        let count = kind.flatMap { kind in
+            search.query.isEmpty || (search.isCode && kind != .code) ? nil : search.counts[kind]
+        }
+        let shortcut = kind.map { $0 == .code ? 7 : (ResultGroupKind.files.firstIndex(of: $0) ?? 0) + 2 } ?? 1
+
+        return Button {
+            if let kind, search.filter != kind {
+                search.filter = kind
+            } else {
+                search.filter = nil
+            }
+        } label: {
             HStack(spacing: 5) {
-                if let symbol { Image(systemName: symbol).font(.system(size: 10.5)) }
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .medium))
                 Text(title)
-                if let count, !search.query.isEmpty {
-                    Text("\(count)").monospacedDigit().opacity(0.6)
+                    .lineLimit(1)
+                if let count {
+                    Text("\(count)")
+                        .monospacedDigit()
+                        .opacity(0.62)
                 }
             }
             .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(selected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(Capsule().fill(selected ? AnyShapeStyle(Color.accentColor)
-                                                : AnyShapeStyle(Color.primary.opacity(0.06))))
-            .contentShape(Capsule())
+            .padding(.horizontal, 8)
         }
-        .buttonStyle(.plain)
-        .help("\(title) (⌘\(number))")
+        .morrowSelection(selected)
+        .buttonBorderShape(.capsule)
+        .controlSize(.small)
+        .help("\(title) (⌘\(shortcut))")
+        .accessibilityLabel(count.map { "\(title), \($0) results" } ?? title)
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
@@ -579,7 +427,7 @@ private struct ResultsGrid: View {
                     }
                 }
                 .onChange(of: search.selection) { _, id in
-                    if let id { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(id) } }
+                    if let id { proxy.scrollTo(id) }
                 }
             }
             .onAppear { updateColumns(geometry.size.width) }
@@ -678,7 +526,7 @@ private struct CodeResultsList: View {
                 .padding(12)
             }
             .onChange(of: search.selection) { _, id in
-                if let id { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(id) } }
+                if let id { proxy.scrollTo(id) }
             }
             .onAppear { search.columns = 1 }
         }
@@ -743,7 +591,7 @@ private struct CodeOffOrHint: View {
                 .foregroundStyle(Brand.gradient)
             if phase == .codeOff {
                 Text("Code search is off").font(.system(size: 17, weight: .semibold))
-                Text("DigUp can find code by what it does, in the folders you pick. Code gets an index of its own and "
+                Text("Morrow can find code by what it does, in the folders you pick. Code gets an index of its own and "
                      + "never shows up in other searches.")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
@@ -762,7 +610,7 @@ private struct CodeOffOrHint: View {
 }
 
 /// A grid cell's picture: the video frame or PDF page that matched (from the preview cache), else Quick Look's.
-private struct MomentThumbnail: View {
+struct MomentThumbnail: View {
     let row: ResultRow
     @State private var image: NSImage?
     @Environment(\.displayScale) private var scale
@@ -782,7 +630,11 @@ private struct MomentThumbnail: View {
         .task(id: row.previewKey) {
             let side: CGFloat = 230
             image = Previews.shared.cached(row, side: side)
-            if image == nil { image = await Previews.shared.load(row, side: side, scale: scale) }
+            if image == nil {
+                let loaded = await Previews.shared.load(row, side: side, scale: scale)
+                guard !Task.isCancelled else { return }
+                image = loaded
+            }
         }
     }
 }
@@ -837,131 +689,19 @@ private struct EmptyState: View {
 /// Nothing typed yet: the app's mark (not a magnifier, which reads as a second search field), a pointer to the field
 /// above, examples to click (each with the kind it finds), what's in the index, and the shortcut. A click anywhere else
 /// puts the cursor in the field.
-private struct SearchHome: View {
-    let search: SearchModel
-    let model: AppModel
-    let engine: Engine
-    @State private var kinds: [FileKind: Int] = [:]
 
-    private static let examples: [(text: String, kind: ResultGroupKind)] = [
-        ("a screenshot of an error message", .screenshots), ("receipt", .documents), ("whiteboard notes", .images),
-        ("someone laughing", .audio), ("a dog on the beach", .video), ("slides about the budget", .documents),
-    ]
-
-    var body: some View {
-        VStack(spacing: 0) {
-            BrandMark()
-            Text("Describe it. Dig it up.")
-                .font(.system(size: 24, weight: .bold))
-                .padding(.top, 18)
-            Text("Type what you remember in the search field above: what's in it, what it looks or sounds like, or "
-                 + "words from it.")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 440)
-                .padding(.top, 6)
-            Text("TRY")
-                .font(.system(size: 10, weight: .semibold))
-                .tracking(0.8)
-                .foregroundStyle(.tertiary)
-                .padding(.top, 26)
-            FlowRow(spacing: 8) {
-                ForEach(examples, id: \.text) { example in
-                    ExampleChip(text: example.text, kind: example.kind) { search.query = example.text }
-                }
-            }
-            .frame(maxWidth: 560)
-            .padding(.top, 8)
-            VStack(spacing: 8) {
-                if !kinds.isEmpty {
-                    HStack(spacing: 8) {
-                        KindCounts(counts: kinds)
-                        Text("in \(folders)")
-                    }
-                } else if model.status.searchable > 0 {
-                    Text("\(model.status.searchable.formatted()) files to search in \(folders)")
-                }
-                if let hotkey = model.hotkey {
-                    HStack(spacing: 6) {
-                        Keycaps(caps: hotkey.caps, size: 10)
-                        Text("opens DigUp from any app")
-                    }
-                }
-            }
-            .font(.system(size: 11))
-            .foregroundStyle(.tertiary)
-            .padding(.top, 30)
-        }
-        .padding(.bottom, 24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Rectangle())
-        .onTapGesture { search.focusField() }
-        .task(id: model.status.files) {
-            var counts: [FileKind: Int] = [:]
-            for summary in await engine.rootSummaries() { counts.merge(summary.kinds, uniquingKeysWith: +) }
-            kinds = counts
-        }
-    }
-
-    /// With code search on, one of code's too.
-    private var examples: [(text: String, kind: ResultGroupKind)] {
-        Self.examples + (model.hasCode ? [("code: where the settings are saved", .code)] : [])
-    }
-
-    private var folders: String {
-        let names = model.settings.roots.map(\.lastPathComponent)
-        return names.count <= 3 ? names.formatted(.list(type: .and)) : "\(names.count) folders"
-    }
-}
-
-/// The app's icon with its own glow (the find in the D) spread soft around it: the window's empty states.
 private struct BrandMark: View {
     var body: some View {
-        Image(nsImage: NSApp.applicationIconImage)
-            .resizable()
-            .frame(width: 84, height: 84)
-            .shadow(color: Brand.moss.opacity(0.3), radius: 14, y: 6)
+        MorrowAppIcon(size: 84)
+            .shadow(color: Brand.accent.opacity(0.3), radius: 14, y: 6)
             .background {
                 Circle()
-                    .fill(RadialGradient(colors: [Brand.amber.opacity(0.22), Brand.leaf.opacity(0.08), .clear],
+                    .fill(RadialGradient(colors: [Brand.accent.opacity(0.22), Brand.coral.opacity(0.08), .clear],
                                          center: .center, startRadius: 0, endRadius: 150))
                     .frame(width: 300, height: 300)
                     .allowsHitTesting(false)
             }
             .accessibilityHidden(true)
-    }
-}
-
-/// An example query: the kind it finds, the words; a click searches for it.
-private struct ExampleChip: View {
-    let text: String
-    let kind: ResultGroupKind
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: kind.symbol)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Brand.leaf)
-                Text(text)
-            }
-            .font(.system(size: 12.5))
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
-            .background(Capsule().fill(Brand.leaf.opacity(hovering ? 0.2 : 0.1)))
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .help("Search for “\(text)”")
-        .onHover { inside in
-            hovering = inside
-            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-        }
-        .onDisappear { if hovering { NSCursor.pop() } }
     }
 }
 

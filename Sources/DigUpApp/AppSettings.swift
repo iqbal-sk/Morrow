@@ -3,11 +3,11 @@ import Foundation
 
 /// What to index, where the index and the model live, and the hotkey.
 ///
-/// Saved in the app's defaults domain (com.abdurrahim.DigUp). Launch arguments override any of it without being
+/// Saved in the app's defaults domain (com.iqbal.morrow). Launch arguments override any of it without being
 /// saved, which is how tests point the app at the testbed and never at real folders:
 ///
-///     DigUp.app/Contents/MacOS/DigUp -roots ~/DigUpTestbed/real -indexDir <repo>/.dev/app-index \
-///         -modelsDir <repo>/.dev/models -defaultsSuite com.abdurrahim.DigUp.dev
+///     Morrow.app/Contents/MacOS/Morrow -roots ~/MorrowTestbed/real -indexDir <repo>/.dev/app-index \
+///         -modelsDir <repo>/.dev/models -defaultsSuite com.iqbal.morrow.dev
 ///
 /// `-roots` takes one folder, several joined with ":", or a plist array. `-defaultsSuite` keeps what the app saves
 /// (onboarding's folders, a new hotkey) out of the real settings. With no roots the app indexes nothing and opens
@@ -16,7 +16,7 @@ nonisolated struct AppSettings: Sendable {
     var roots: [URL]
     /// Folders inside the roots that are never indexed.
     var excludedFolders: [URL]
-    /// File extensions that are never indexed ("heic", "txt"), on top of what DigUp never reads anyway.
+    /// File extensions that are never indexed ("heic", "txt"), on top of what Morrow never reads anyway.
     var excludedTypes: [String]
     var indexDirectory: URL
     /// Where the model files are downloaded to and loaded from (the helpers get it as DIGUP_MODELS).
@@ -43,9 +43,9 @@ nonisolated struct AppSettings: Sendable {
     /// The code index catches up once the code folders have been quiet this long (`-codeQuietSeconds`, default 60).
     var codeQuietSeconds: Double
 
-    static let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/DigUp People")
-    static let defaultIndexDirectory = supportDirectory.appendingPathComponent("index.noindex")
+    static let supportDirectory = AppPaths.applicationSupport
+    static let defaultIndexDirectory = AppPaths.defaultIndex
+    static let defaultModelsDirectory = ModelFiles.installed
     static let defaultHotkey = "ctrl+shift+space"
 
     /// The battery switch, in onboarding and Settings.
@@ -68,7 +68,7 @@ nonisolated struct AppSettings: Sendable {
                 ?? defaults.string(forKey: "excludedTypes").map { [$0] } ?? [])
                 .flatMap { IndexOptions.extensions($0) }.sorted(),
             indexDirectory: defaults.string(forKey: "indexDir").map(folderURL) ?? defaultIndexDirectory,
-            modelsDirectory: defaults.string(forKey: "modelsDir").map(folderURL) ?? supportDirectory.appendingPathComponent("Models"),
+            modelsDirectory: defaults.string(forKey: "modelsDir").map(folderURL) ?? defaultModelsDirectory,
             hotkey: defaults.string(forKey: "hotkey") ?? defaultHotkey,
             indexOnBattery: defaults.object(forKey: "indexOnBattery") == nil || defaults.bool(forKey: "indexOnBattery"),
             indexHoursOn: defaults.bool(forKey: "indexHoursOn"),
@@ -142,8 +142,11 @@ nonisolated struct AppSettings: Sendable {
 
     /// Expands "~" and resolves symlinks, so crawled paths match the paths FSEvents reports.
     static func folderURL(_ path: String) -> URL {
-        URL(fileURLWithPath: (path.trimmingCharacters(in: .whitespaces) as NSString).expandingTildeInPath)
-            .resolvingSymlinksInPath().standardizedFileURL
+        let expanded = URL(fileURLWithPath: (path.trimmingCharacters(in: .whitespaces) as NSString).expandingTildeInPath)
+            .standardizedFileURL.path
+        // Standardizing *after* resolving symlinks changes /private/var back to /var on macOS.
+        // Keep the walk's spelling so file/code/face filters agree with the stored file paths.
+        return URL(fileURLWithPath: FolderSelection.realPath(expanded))
     }
 
     static func isFolder(_ url: URL) -> Bool {
@@ -152,7 +155,7 @@ nonisolated struct AppSettings: Sendable {
     }
 }
 
-/// "~/DigUpTestbed/real" instead of "/Users/…/DigUpTestbed/real".
+/// "~/MorrowTestbed/real" instead of "/Users/…/MorrowTestbed/real".
 nonisolated func tildePath(_ path: String) -> String {
     (path as NSString).abbreviatingWithTildeInPath
 }

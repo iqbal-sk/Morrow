@@ -19,9 +19,7 @@ struct SearchPanelView: View {
         }
         .frame(width: SearchPanelController.width)
         .frame(maxHeight: .infinity, alignment: .top)
-        // Glass alone is too see-through over busy backgrounds.
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.75))
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .morrowTheme()
     }
 
     private var header: some View {
@@ -34,9 +32,7 @@ struct SearchPanelView: View {
                 .help(controller.isCode ? "Searching your code" : "")
             // With code search on, one example is code's: nothing else in the panel shows "code:".
             SearchField(text: $controller.query, fontSize: 22,
-                        placeholder: controller.model.hasCode
-                            ? "Describe it: “zebra in a video”, “code: retry with backoff”…"
-                            : "Describe it: “payment error screenshot”, “zebra in a video”…") {
+                        placeholder: "Search by a memory, a person, or a few words…") {
                 controller.field = $0
             }
             if controller.phase == .words, controller.encoder == .starting {
@@ -52,7 +48,9 @@ struct SearchPanelView: View {
                     .help(controller.model.statusLine)
             }
         }
-        .padding(.horizontal, 18)
+        .padding(.horizontal, 14)
+        .frame(height: 46)
+        .padding(.horizontal, 12)
         .frame(height: SearchPanelController.fieldHeight)
     }
 
@@ -65,7 +63,7 @@ struct SearchPanelView: View {
                     Text("Searching…").foregroundStyle(.secondary)
                 } else if !controller.model.hasFolders {
                     Text("No folders chosen yet").font(.system(size: 15, weight: .semibold))
-                    Text("DigUp only searches the folders you pick.").foregroundStyle(.secondary)
+                    Text("Morrow only searches the folders you pick.").foregroundStyle(.secondary)
                     Button("Choose Folders…") { controller.chooseFolders() }
                         .padding(.top, 4)
                 } else if controller.isCode {
@@ -88,6 +86,8 @@ struct SearchPanelView: View {
                     if let row = controller.selectedRow {
                         VStack(alignment: .leading, spacing: 10) {
                             PreviewPane(row: row, imageSize: CGSize(width: 410, height: 214),
+                                        matchedPeople: controller.personContext.people.map(\.name),
+                                        personOnly: !controller.personContext.people.isEmpty && controller.personContext.remainder.isEmpty,
                                         open: { controller.openSelected() })
                             PreviewActions(row: row, open: { controller.openSelected() },
                                            reveal: { controller.revealSelected() }, controlSize: .small)
@@ -181,7 +181,7 @@ private struct ResultList: View {
                                     .padding(.vertical, 3)
                             }
                             .buttonStyle(.plain)
-                            .help("Open them in the DigUp window (⌘O shows everything)")
+                            .help("Open them in the Morrow window (⌘O shows everything)")
                         }
                     }
                     if !controller.results.weaker.isEmpty {
@@ -349,7 +349,9 @@ struct ThumbnailView: View {
             guard !iconOnly else { return }
             image = Thumbnails.shared.cached(url, side: side)
             if image == nil {
-                image = await Thumbnails.shared.load(url, side: side, scale: scale)
+                let loaded = await Thumbnails.shared.load(url, side: side, scale: scale)
+                guard !Task.isCancelled else { return }
+                image = loaded
             }
         }
     }
@@ -522,7 +524,7 @@ private struct CodeHint: View {
                 .foregroundStyle(Brand.gradient)
             if controller.phase == .codeOff {
                 Text("Code search is off").font(.system(size: 15, weight: .semibold))
-                Text("DigUp can find code by what it does, in the folders you pick. Code gets an index of its own "
+                Text("Morrow can find code by what it does, in the folders you pick. Code gets an index of its own "
                      + "and never shows up in other searches.")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -539,7 +541,7 @@ private struct CodeHint: View {
                                 .font(.system(size: 12, design: .monospaced))
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 4)
-                                .background(Capsule().fill(Brand.leaf.opacity(0.12)))
+                                .background(Capsule().fill(Brand.coral.opacity(0.12)))
                         }
                         .buttonStyle(.plain)
                     }

@@ -16,7 +16,7 @@ nonisolated struct FolderEstimate: Identifiable, Sendable {
     var longFiles = 0
     /// For code search: about how big its part of the code index gets on disk.
     var bytes = 0.0
-    /// False when macOS doesn't let DigUp read the folder (it was denied in the privacy prompt).
+    /// False when macOS doesn't let Morrow read the folder (it was denied in the privacy prompt).
     let readable: Bool
     /// The estimate never came (the helper stopped early).
     var failed = false

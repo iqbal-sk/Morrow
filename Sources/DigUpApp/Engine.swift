@@ -37,7 +37,7 @@ nonisolated struct EngineStatus: Sendable, Equatable {
     var waitingForModel = false
     /// Chosen folders that aren't there right now (an unplugged drive): skipped, and their files kept.
     var missingRoots: [String] = []
-    /// Chosen folders macOS doesn't let DigUp read (Privacy & Security → Files and Folders): skipped, files kept.
+    /// Chosen folders macOS doesn't let Morrow read (Privacy & Security → Files and Folders): skipped, files kept.
     var unreadableRoots: [String] = []
     /// What the last sync left out under each chosen folder, by reason (files inside code projects, other types, cloud
     /// placeholders…), for the Folders tab.
@@ -54,7 +54,7 @@ nonisolated struct EngineStatus: Sendable, Equatable {
         var indexing: Progress?
         /// Code folders that aren't there right now (an unplugged drive): skipped, and their files kept.
         var missingRoots: [String] = []
-        /// Code folders macOS doesn't let DigUp read: skipped, files kept.
+        /// Code folders macOS doesn't let Morrow read: skipped, files kept.
         var unreadableRoots: [String] = []
     }
 
@@ -90,11 +90,11 @@ nonisolated final class Engine: @unchecked Sendable {
     let indexDirectory: URL
     let modelsDirectory: URL
     let encoderIdleSeconds: Double
-    private let indexQueue = DispatchQueue(label: "DigUp.index", qos: .utility)
-    private let searchQueue = DispatchQueue(label: "DigUp.search", qos: .userInitiated)
-    private let encoderQueue = DispatchQueue(label: "DigUp.encoder", qos: .userInitiated)
+    private let indexQueue = DispatchQueue(label: "Morrow.index", qos: .utility)
+    private let searchQueue = DispatchQueue(label: "Morrow.search", qos: .userInitiated)
+    private let encoderQueue = DispatchQueue(label: "Morrow.encoder", qos: .userInitiated)
 
-    private let watchQueue = DispatchQueue(label: "DigUp.watch", qos: .utility)
+    private let watchQueue = DispatchQueue(label: "Morrow.watch", qos: .utility)
 
     // indexQueue only
     private var helper: Process?
@@ -116,6 +116,8 @@ nonisolated final class Engine: @unchecked Sendable {
     /// When a sync was last asked for that no helper has started yet; a helper that exits before doing it is
     /// restarted.
     private var syncWantedAt: Date?
+    /// Folder paths queued for deletion once the helper closes its database connection; nil means the whole index.
+    private var pendingIndexResets: [String?] = []
     private var lastSearcherRefresh = Date.distantPast
 
     /// Code search: the code index once code has been quiet this long (a file being edited changes on every save, a
@@ -145,8 +147,8 @@ nonisolated final class Engine: @unchecked Sendable {
     private var peopleProfiles: [PersonProfile] = []
 
     func setPeople(_ profiles: [PersonProfile]) { lock.withLock { peopleProfiles = profiles } }
-    func faceSelection() -> [String: [String]] {
-        lock.withLock { ["roots": roots.map(\.path), "excluded": excluded.map(\.path), "types": excludedTypes] }
+    func faceSelection() -> FacePhotoSelection {
+        lock.withLock { FacePhotoSelection(roots: roots.map(\.path), excluded: excluded.map(\.path), types: excludedTypes) }
     }
     func personQuery(_ text: String) -> PersonQuery {
         PeopleStore.resolve(text, profiles: lock.withLock { peopleProfiles })
@@ -302,6 +304,53 @@ nonisolated final class Engine: @unchecked Sendable {
             } else {
                 startHelper()
             }
+        }
+    }
+
+    /// Removes indexed file data, then lets the normal helper crawl and rebuild it. If a helper is running, wait for
+    /// its current batch to finish before touching the same SQLite files.
+    func resetIndex(under directory: URL? = nil) {
+        let path = directory?.standardizedFileURL.path
+        indexQueue.async { [self] in
+            pendingIndexResets.append(path)
+            log(path.map { "index reset requested under \(tildePath($0))" } ?? "full index reset requested")
+            if helper != nil {
+                restartHelper = true
+                stopHelper()
+            } else {
+                guard applyPendingIndexResets() else { return }
+                startHelper()
+            }
+        }
+    }
+
+    /// Runs on `indexQueue` only after the indexing helper has exited, so no extraction batch can recreate stale rows.
+    private func applyPendingIndexResets() -> Bool {
+        guard !pendingIndexResets.isEmpty else { return true }
+        let requests = pendingIndexResets
+        pendingIndexResets.removeAll()
+        let scopes: [String?] = requests.contains(where: { $0 == nil })
+            ? [nil] : Array(Set(requests.compactMap { $0 })).sorted().map(Optional.some)
+        do {
+            let removed = try IndexReset.delete(in: indexDirectory, scopes: scopes)
+            let scopeText = scopes == [nil] ? "all folders" : scopes.compactMap { $0 }.map(tildePath).joined(separator: ", ")
+            log("index reset: removed \(removed) indexed files from \(scopeText)")
+            refreshIndexStatusAfterReset()
+            return true
+        } catch {
+            log("index reset failed: \(error)")
+            update { $0.activity = .failed("Couldn't reset the index") }
+            return false
+        }
+    }
+
+    /// Keeps the Settings counts and the in-memory vector searcher in step even when indexing is paused.
+    private func refreshIndexStatusAfterReset() {
+        searchQueue.async { [self] in
+            if let searcher, searcher.vectorsLoaded { try? searcher.reload() }
+            if let searchStore, let counts = try? searchStore.counts() { apply(counts) }
+            if let codeSearcher, codeSearcher.vectorsLoaded { try? codeSearcher.reload() }
+            if let codeStore, let counts = try? codeStore.counts() { applyCode(counts) }
         }
     }
 
@@ -657,7 +706,7 @@ nonisolated final class Engine: @unchecked Sendable {
         case "stopped":
             log("indexer: skipped \(tildePath(event["path"] as? String ?? "?")): it \(event["why"] as? String ?? "")")
         case "rescan":
-            log("indexer: reading \(int("files")) files again that DigUp reads better now (scans' words, SVGs)")
+            log("indexer: reading \(int("files")) files again that Morrow reads better now (scans' words, SVGs)")
         case "pruned":
             log("indexer: \(int("files")) files under folders no longer chosen left the index")
         case "reindex":
@@ -750,6 +799,11 @@ nonisolated final class Engine: @unchecked Sendable {
         refreshCodeSearcher(force: true)
         returnFreedMemory()
         removeCodeIndexIfAsked()
+        guard applyPendingIndexResets() else {
+            restartHelper = false
+            startWanted = false
+            return
+        }
         if restartHelper || startWanted {
             // The folders changed (a new helper with the new ones), or a start was asked while this one was stopping.
             restartHelper = false
@@ -841,7 +895,7 @@ nonisolated final class Engine: @unchecked Sendable {
     /// unplugged) are left out.
     /// `code`: the code index (its own folders), never anything else.
     func search(_ text: String, vector: QueryVector?, prefixLast: Bool, kinds: Set<FileKind>? = nil,
-                limit: Int = 40, code: Bool = false) async -> [SearchHit] {
+                limit: Int = 40, code: Bool = false, folder: String? = nil) async -> [SearchHit] {
         if code { return await searchCode(text, vector: vector, prefixLast: prefixLast, limit: limit) }
         return await withCheckedContinuation { continuation in
             searchQueue.async { [self] in
@@ -854,9 +908,13 @@ nonisolated final class Engine: @unchecked Sendable {
                     values = nil
                 }
                 let person = personQuery(text)
-                let filter = person.people.isEmpty ? nil : (try? searchStore.map {
-                    try PeopleStore(store: $0).fileIDs(for: person.people.map(\.id))
+                var filter = person.people.isEmpty ? nil : (try? searchStore.map {
+                    try PeopleStore(store: $0).fileIDs(for: person.people.map(\.id), selection: faceSelection())
                 }) ?? Set<Int64>()
+                if let folder {
+                    let scoped = (try? searchStore?.libraryFileIDs(under: [folder])) ?? []
+                    filter = filter.map { $0.intersection(scoped) } ?? scoped
+                }
                 let searchText = person.people.isEmpty ? text : person.remainder
                 let hits = try? searcher?.search(searchText, queryVector: values, kinds: kinds, limit: limit,
                                                  prefixLast: prefixLast, fileIDs: filter)
@@ -872,6 +930,24 @@ nonisolated final class Engine: @unchecked Sendable {
                         && !types.contains((hit.path as NSString).pathExtension.lowercased())
                         && FileManager.default.fileExists(atPath: hit.path)
                 })
+            }
+        }
+    }
+
+    /// The library reads the same index on its existing serial search queue.
+    func libraryFiles(folder: String? = nil, kinds: Set<FileKind>? = nil, limit: Int = 120) async -> [SearchHit] {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                let (chosen, skipped, types) = lock.withLock {
+                    (roots.map(\.path), excluded.map(\.path), Set(excludedTypes))
+                }
+                let scope = folder.map { [$0] } ?? chosen
+                guard scope.allSatisfy({ path in chosen.contains { path == $0 || FolderSelection.isInside(path, $0) } }) else {
+                    return continuation.resume(returning: [])
+                }
+                let hits = (try? searchStore?.libraryFiles(under: scope, excluded: skipped,
+                                                         excludedTypes: types, kinds: kinds, limit: limit)) ?? []
+                continuation.resume(returning: hits)
             }
         }
     }
@@ -1018,7 +1094,7 @@ nonisolated final class Engine: @unchecked Sendable {
         let context = code ? nil : personQuery(text)
         let topic = context?.people.isEmpty == false ? context!.remainder : text
         guard !topic.isEmpty else { return nil }
-        let key = Self.cacheKey(text, code: code)
+        let key = Self.cacheKey(topic, code: code)
         if let cached = vectorCache[key] { return cached }
         guard let worker = runningEncoder() else { return nil }
         defer { scheduleIdleExit() }

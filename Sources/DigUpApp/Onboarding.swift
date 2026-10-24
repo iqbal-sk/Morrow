@@ -3,7 +3,7 @@ import DigUpKit
 import Observation
 import SwiftUI
 
-/// First launch, in four steps: what DigUp does, which folders to search (with how long the first pass takes), the
+/// First launch, in four steps: what Morrow does, which folders to search (with how long the first pass takes), the
 /// hotkey (try it), and done; a fifth, code search, when there are folders with code on the Mac (it stays off unless
 /// you turn it on there). The model downloads from Get Started on, shown at the bottom of every later step, and
 /// the chosen folders start indexing as soon as you continue past them.
@@ -35,11 +35,11 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
-        window.title = "Welcome to DigUp"
+        window.title = "Welcome to Morrow"
         window.isReleasedWhenClosed = false
         window.delegate = self
         state.close = { [weak self] in self?.close() }
-        window.contentView = NSHostingView(rootView: OnboardingView(state: state))
+        window.contentView = NSHostingView(rootView: OnboardingView(state: state).morrowTheme())
         window.center()
         self.window = window
         return window
@@ -166,6 +166,7 @@ final class OnboardingState {
         self.step = step
         app.hotkeyTester = step == .shortcut ? { [weak self] in self?.hotkeyWorked = true } : nil
         if step == .folders { folders.startEstimates() }
+        if step == .code, searchCode { codeFolders.startEstimates() }
     }
 
     func finish() {
@@ -223,7 +224,7 @@ struct OnboardingView: View {
         VStack(spacing: 0) {
             Group {
                 switch state.step {
-                case .welcome: WelcomeStep()
+                case .welcome: WelcomeStep(launch: state.app.launchLogo)
                 case .folders: FoldersStep(state: state)
                 case .code: CodeStep(state: state)
                 case .shortcut: ShortcutStep(state: state)
@@ -238,7 +239,7 @@ struct OnboardingView: View {
         }
         .frame(width: Self.size.width, height: Self.size.height)
         .background(alignment: .top) {
-            // A soft moss glow behind the top of each step, from the icon's colors.
+            // A soft peach glow behind the top of each step, from the icon's colors.
             Brand.wash
                 .frame(height: 260)
                 .mask(LinearGradient(colors: [.black.opacity(0.10), .clear], startPoint: .top, endPoint: .bottom))
@@ -263,6 +264,7 @@ struct OnboardingView: View {
                 Button("Back") { state.back() }
             }
             Button(continueTitle) { state.next() }
+                .morrowAction(.primary)
                 .keyboardShortcut(.defaultAction)
                 .disabled(state.step == .folders && state.folders.roots.isEmpty)
         }
@@ -348,13 +350,12 @@ struct DownloadStatus: View {
 }
 
 private struct WelcomeStep: View {
+    let launch: LogoLaunchState
     var body: some View {
         VStack(spacing: 0) {
-            Image(nsImage: NSApp.applicationIconImage)
-                .resizable()
-                .frame(width: 96, height: 96)
-                .shadow(color: Brand.moss.opacity(0.35), radius: 14, y: 6)
-            Text("DigUp")
+            MorrowAppIcon(size: 96, launch: launch)
+                .shadow(color: Brand.accent.opacity(0.35), radius: 14, y: 6)
+            Text("Morrow")
                 .font(.system(size: 30, weight: .bold))
                 .padding(.top, 10)
             Text("Describe it. Dig it up.")
@@ -375,8 +376,8 @@ private struct WelcomeStep: View {
                     .font(.system(size: 18))
                     .foregroundStyle(.secondary)
                     .frame(width: 30)
-                Text("Everything is indexed and searched on this Mac. DigUp downloads its AI model (865 MB) once; "
-                     + "after that it works offline, and nothing you index ever leaves your Mac. Next, DigUp looks "
+                Text("Everything is indexed and searched on this Mac. Morrow downloads its AI model (865 MB) once; "
+                     + "after that it works offline, and nothing you index ever leaves your Mac. Next, Morrow looks "
                      + "through your usual folders to say how long each would take; nothing is indexed until you choose.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -432,7 +433,7 @@ private struct FoldersStep: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            StepTitle(title: "What should DigUp search?",
+            StepTitle(title: "What should Morrow search?",
                       subtitle: "Pick folders, or open one to pick some of its subfolders. You can change this "
                           + "anytime in Settings.")
             ScrollView {
@@ -446,8 +447,8 @@ private struct FoldersStep: View {
             .scrollBounceBehavior(.basedOnSize)
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "info.circle").foregroundStyle(.secondary)
-                Text("macOS will ask before DigUp can read folders like Desktop, Documents and Downloads. "
-                     + "DigUp only reads files: it never changes, moves or uploads them.")
+                Text("macOS will ask before Morrow can read folders like Desktop, Documents and Downloads. "
+                     + "Morrow only reads files: it never changes, moves or uploads them.")
                     .fixedSize(horizontal: false, vertical: true)
             }
             .font(.system(size: 11))
@@ -524,7 +525,7 @@ private struct CodeStep: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             StepTitle(title: "Search your code too?",
-                      subtitle: "DigUp can find code by what it does: type code: in the search panel, as in "
+                      subtitle: "Morrow can find code by what it does: type code: in the search panel, as in "
                           + "“code: retry with backoff”. It gets an index of its own and never shows up in other "
                           + "searches. You can turn it on later in Settings → Code.")
             SwitchRow(title: "Search my code", detail: "Off unless you turn it on.", isOn: $state.searchCode)
@@ -564,7 +565,7 @@ private struct ShortcutStep: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            StepTitle(title: "Open DigUp from anywhere",
+            StepTitle(title: "Open Morrow from anywhere",
                       subtitle: "Press the shortcut in any app, describe what you're looking for, and press Return.")
             ShortcutRecorder(combo: state.model.hotkey, apply: { state.app.setHotkey($0) },
                              listening: { state.app.hotkeyRecording($0) }, capSize: 20)
@@ -580,7 +581,7 @@ private struct ShortcutStep: View {
             }
             .font(.system(size: 13, weight: .medium))
             .padding(.top, 16)
-            .animation(.default, value: state.hotkeyWorked)
+            .animation(nil, value: state.hotkeyWorked)
             VStack(alignment: .leading, spacing: 9) {
                 Text("IN THE SEARCH PANEL")
                     .font(.system(size: 10, weight: .semibold))
@@ -633,7 +634,7 @@ private struct ReadyStep: View {
                 .frame(maxWidth: 470)
                 .padding(.top, 8)
             VStack(alignment: .leading, spacing: 16) {
-                SwitchRow(title: "Open DigUp when you log in", detail: "So the shortcut always works.",
+                SwitchRow(title: "Open Morrow when you log in", detail: "So the shortcut always works.",
                           isOn: $state.launchAtLogin)
                 Divider()
                 SwitchRow(title: AppSettings.batteryTitle, detail: AppSettings.batteryDetail,
@@ -645,7 +646,7 @@ private struct ReadyStep: View {
             .padding(.top, 28)
             HStack(spacing: 8) {
                 Image(systemName: "sparkle.magnifyingglass")
-                Text("DigUp lives in the menu bar, which shows how indexing is going.")
+                Text("Morrow lives in the menu bar, which shows how indexing is going.")
             }
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
@@ -660,10 +661,10 @@ private struct ReadyStep: View {
         let rest = later >= 30 ? " Long PDFs and documents get their first pages in that time, and the rest "
             + "afterwards (about \(roughDuration(later)) more)." : ""
         if state.download.isReady {
-            return "DigUp is reading your folders\(time), newest files first. You can search right away; "
+            return "Morrow is reading your folders\(time), newest files first. You can search right away; "
                 + "results fill in as it goes." + rest
         }
-        return "DigUp starts reading your folders\(time) once the model has downloaded "
+        return "Morrow starts reading your folders\(time) once the model has downloaded "
             + "(\(state.download.progressText)). Until then, search finds files by name." + rest
     }
 }

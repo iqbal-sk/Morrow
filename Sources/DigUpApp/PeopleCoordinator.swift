@@ -9,10 +9,16 @@ private actor PeopleDatabase {
         store = try PeopleStore(directory: directory)
         try store.setMinimumFacePixels(minimumFacePixels)
     }
-    func snapshot(person: Int64?, reconcile: Bool) throws -> ([PersonProfile], [FaceReview], [(Int64, Data)], Int, Int) {
+    func snapshot(person: Int64?, reconcile: Bool, selection: FacePhotoSelection, includePending: Bool) throws -> PeopleSnapshot {
         if reconcile { try store.rematchIfNeeded() }
-        return (try store.profiles(), try store.review(person: person), try person.map { try store.references(person: $0) } ?? [],
-                try store.pendingPhotos().count, try store.failedPhotos())
+        let profiles = try store.profiles(selection: selection)
+        let pending = includePending
+            ? try store.pendingPhotoSummary(selection: selection, isReadable: FileManager.default.isReadableFile(atPath:))
+            : (count: 0, hasReadable: false)
+        return PeopleSnapshot(profiles: profiles, reviews: try store.review(person: person, selection: selection),
+                              references: try person.map { try store.references(person: $0) } ?? [],
+                              pending: pending.count, hasAvailablePending: pending.hasReadable,
+                              failedPhotos: try store.failedPhotos(selection: selection))
     }
     func save(id: Int64?, name: String, aliases: [String]) throws -> Int64 { try store.savePerson(id: id, name: name, aliases: aliases) }
     func add(person: Int64, sample: FaceSample, source: String) throws {
@@ -26,8 +32,18 @@ private actor PeopleDatabase {
     func deleteReference(_ id: Int64) throws { try store.deleteReference(id) }
 }
 
+private struct PeopleSnapshot: Sendable {
+    let profiles: [PersonProfile]
+    let reviews: [FaceReview]
+    let references: [(Int64, Data)]
+    let pending: Int
+    let hasAvailablePending: Bool
+    let failedPhotos: Int
+}
+
 /// The executable owns inference memory; cancellation terminates only this coordinator's helper.
 private actor FaceHelperGate {
+    static let shared = FaceHelperGate()
     private var held = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     func withPermit<T: Sendable>(_ operation: @Sendable () async throws -> T) async rethrows -> T {
@@ -43,7 +59,8 @@ private actor FaceHelperGate {
 
 nonisolated final class FaceHelper: @unchecked Sendable {
     private let lock = NSLock()
-    private let serial = FaceHelperGate()
+    // Detection and background indexing must not each load their own SFace/ONNX session.
+    private let serial = FaceHelperGate.shared
     private var process: Process?
     private var generation = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -75,7 +92,7 @@ nonisolated final class FaceHelper: @unchecked Sendable {
         state.1.forEach { $0.resume() }
         return state.0
     }
-    func run(arguments: [String]) async throws -> Data {
+    func run(arguments: [String], onProgress: @escaping @Sendable (Int, Int) async -> Void = { _, _ in }) async throws -> Data {
         let token = lock.withLock { generation }
         return try await withTaskCancellationHandler {
           try await serial.withPermit {
@@ -96,13 +113,34 @@ nonisolated final class FaceHelper: @unchecked Sendable {
                 _ = complete(process, token: token)
                 throw error
             }
-            let data = output.fileHandleForReading.readDataToEndOfFile()
+            let reader = output.fileHandleForReading
+            var data = Data()
+            var lineBuffer = Data()
+            while true {
+                let chunk = reader.availableData
+                guard !chunk.isEmpty else { break }
+                data.append(chunk)
+                lineBuffer.append(chunk)
+                while let newline = lineBuffer.firstIndex(of: 10) {
+                    let line = Data(lineBuffer[..<newline])
+                    lineBuffer.removeSubrange(...newline)
+                    if let event = try? JSONSerialization.jsonObject(with: line) as? [String: Int],
+                       let done = event["done"], let total = event["total"], total > 0 {
+                        await onProgress(done, total)
+                    }
+                }
+            }
+            if !lineBuffer.isEmpty,
+               let event = try? JSONSerialization.jsonObject(with: lineBuffer) as? [String: Int],
+               let done = event["done"], let total = event["total"], total > 0 {
+                await onProgress(done, total)
+            }
             process.waitUntilExit()
             let cancelled = complete(process, token: token)
             if cancelled { throw CancellationError() }
             guard process.terminationStatus == 0 else {
-                throw NSError(domain: "DigUp.People", code: Int(process.terminationStatus),
-                    userInfo: [NSLocalizedDescriptionKey: "Face processing stopped. Try another photo or resume indexing."])
+                throw NSError(domain: "Morrow.People", code: Int(process.terminationStatus),
+                    userInfo: [NSLocalizedDescriptionKey: "Face processing stopped. Try another photo or resume the face scan."])
             }
             return data
             }.value
@@ -116,26 +154,60 @@ nonisolated final class FaceHelper: @unchecked Sendable {
     var reviews: [FaceReview] = []
     var references: [(Int64, Data)] = []
     var selectedPerson: Int64?
+    var reviewingAllFaces = false
     var pending = 0
+    var hasAvailablePending = false
     var failedPhotos = 0
     var isScanning = false
     var isPaused = false
-    var isDetecting = false
+    var scanProgress: EngineStatus.Progress?
+    private var detectionCount = 0
+    var isDetecting: Bool { detectionCount > 0 }
+    var scanProgressFraction: Double? {
+        guard let scanProgress, scanProgress.total > 0 else { return nil }
+        return Double(scanProgress.done) / Double(scanProgress.total)
+    }
+    var scanStatusLine: String {
+        guard enabled else { return "Off · face scanning is disabled" }
+        guard profiles.contains(where: { $0.references > 0 }) else {
+            return "Add a person and reference photos to start"
+        }
+        if isPaused { return "Paused · \(pending.formatted()) photos left to scan" }
+        if isUpdatingFacePolicy { return "Updating face scan settings…" }
+        if isAddingReferences { return "Adding reference photos…" }
+        if let waitingReason { return waitingReason }
+        if isScanning {
+            if let scanProgress, scanProgress.total > 0 {
+                return "Scanning faces · \(scanProgress.done.formatted()) of \(scanProgress.total.formatted()) photos this batch"
+            }
+            return "Starting face scan"
+        }
+        if pending > 0 { return "\(pending.formatted()) photos left to scan" }
+        if failedPhotos > 0 { return "\(failedPhotos.formatted()) photos couldn’t be checked · retry in Activity" }
+        return "Up to date · no photos left to scan"
+    }
+    var waitingReason: String?
     private(set) var isAddingReferences = false
     private(set) var minimumFacePixels = FaceIdentity.defaultMinimumFacePixels
     private(set) var isUpdatingFacePolicy = false
     var problem: String?
     var enabled: Bool {
-        didSet { AppSettings.defaults.set(enabled, forKey: "peopleEnabled"); if !enabled { pause() } else { isPaused = false; scan() } }
+        didSet {
+            AppSettings.defaults.set(enabled, forKey: "peopleEnabled")
+            engine.setPeople(enabled ? profiles : [])
+            if !enabled { pause() } else { isPaused = false; scan() }
+        }
     }
     @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private let engine: Engine
     @ObservationIgnored private var database: PeopleDatabase?
     @ObservationIgnored private let scanner = FaceHelper()
     @ObservationIgnored private let detector = FaceHelper()
+    @ObservationIgnored private var activeReferenceImportID: UUID?
     @ObservationIgnored private var timer: Task<Void, Never>?
     @ObservationIgnored private var facePolicyGeneration = 0
-    @ObservationIgnored var mayIndex: () -> Bool = { true }
+    @ObservationIgnored private var refreshGeneration = 0
+    @ObservationIgnored var backgroundIndexingWaitReason: () -> String? = { nil }
     init(settings: AppSettings, engine: Engine) {
         self.settings = settings; self.engine = engine
         enabled = AppSettings.defaults.bool(forKey: "peopleEnabled")
@@ -155,25 +227,50 @@ nonisolated final class FaceHelper: @unchecked Sendable {
     }
     func refresh() async {
         guard let database else { return }
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        let person = selectedPerson
+        let allFaces = reviewingAllFaces
         do {
-            let snapshot = try await database.snapshot(person: selectedPerson, reconcile: !isAddingReferences && !isScanning)
-            profiles = snapshot.0; reviews = snapshot.1; references = snapshot.2; pending = snapshot.3; failedPhotos = snapshot.4
+            let snapshot = try await database.snapshot(person: allFaces ? nil : person,
+                                                       reconcile: !isAddingReferences && !isScanning,
+                                                       selection: engine.faceSelection(), includePending: enabled)
+            guard generation == refreshGeneration, selectedPerson == person,
+                  reviewingAllFaces == allFaces else { return }
+            profiles = snapshot.profiles
+            // Removing the selected person, or loading for the first time, selects the next valid person.
+            if !allFaces, !profiles.contains(where: { $0.id == person }), let first = profiles.first {
+                selectedPerson = first.id
+                await refresh()
+                return
+            }
+            if profiles.isEmpty { selectedPerson = nil }
+            reviews = snapshot.reviews
+            references = snapshot.references
+            pending = snapshot.pending; hasAvailablePending = snapshot.hasAvailablePending
+            failedPhotos = snapshot.failedPhotos
             engine.setPeople(enabled ? profiles : [])
-        } catch { problem = error.localizedDescription }
+        } catch {
+            guard generation == refreshGeneration else { return }
+            problem = error.localizedDescription
+        }
     }
     @discardableResult func save(id: Int64?, name: String, aliases: String) async -> Int64? {
         do {
-            guard let database else { return nil }
+            guard let database else {
+                problem = "People search could not open its local database. Reopen Morrow and try again."
+                return nil
+            }
             let saved = try await database.save(id: id, name: name, aliases: aliases.split(separator: ",").map(String.init))
             selectedPerson = saved
+            reviewingAllFaces = false
             await refresh()
             return saved
         } catch { problem = error.localizedDescription; return nil }
     }
     func candidates(_ photo: URL) async throws -> FacePhoto {
-        guard !isDetecting else { throw CancellationError() }
-        isDetecting = true
-        defer { isDetecting = false }
+        detectionCount += 1
+        defer { detectionCount -= 1 }
         // Enrollment gets priority over the background scan.
         return try await withTaskCancellationHandler {
             await scanner.cancelAndWait()
@@ -183,15 +280,25 @@ nonisolated final class FaceHelper: @unchecked Sendable {
             return try JSONDecoder().decode(FacePhoto.self, from: data)
         } onCancel: { detector.cancel() }
     }
-    func beginReferenceImport() {
+    func beginReferenceImport(_ batchID: UUID) {
+        activeReferenceImportID = batchID
         isAddingReferences = true
+        waitingReason = nil
+        scanProgress = nil
         scanner.cancel()
     }
-    func endReferenceImport() {
-        guard isAddingReferences else { return }
+    func endReferenceImport(_ batchID: UUID) {
+        // A late onDisappear from a replaced picker must not stop a newer reference batch.
+        guard activeReferenceImportID == batchID else { return }
+        activeReferenceImportID = nil
         isAddingReferences = false
+        // Cancel this import synchronously. A deferred detector.cancelAndWait() could run after another picker
+        // opens and cancel that newer import, because both use the same detector helper.
+        detector.cancel()
+        scanner.cancel()
         Task {
             await scanner.cancelAndWait()
+            guard activeReferenceImportID == nil else { return }
             do {
                 try await database?.rematchIfNeeded()
                 await refresh()
@@ -213,7 +320,11 @@ nonisolated final class FaceHelper: @unchecked Sendable {
         catch { problem = error.localizedDescription }
     }
     func removePerson(_ person: Int64) async {
-        do { try await database?.deletePerson(person); selectedPerson = nil; await refresh() }
+        do {
+            try await database?.deletePerson(person)
+            if selectedPerson == person { selectedPerson = nil }
+            await refresh()
+        }
         catch { problem = error.localizedDescription }
     }
     func removeReference(_ id: Int64) async {
@@ -228,6 +339,7 @@ nonisolated final class FaceHelper: @unchecked Sendable {
         facePolicyGeneration += 1
         let generation = facePolicyGeneration
         isUpdatingFacePolicy = true
+        scanProgress = nil
         scanner.cancel()
         Task {
             await scanner.cancelAndWait()
@@ -236,6 +348,7 @@ nonisolated final class FaceHelper: @unchecked Sendable {
                 try await database?.setMinimumFacePixels(rounded)
                 await refresh()
             } catch { problem = error.localizedDescription }
+            guard generation == facePolicyGeneration else { return }
             isUpdatingFacePolicy = false
             scan()
         }
@@ -250,25 +363,72 @@ nonisolated final class FaceHelper: @unchecked Sendable {
             } catch { problem = error.localizedDescription }
         }
     }
-    func pause() { isPaused = true; scanner.cancel() }
-    func foldersChanged() { scanner.cancel(); Task { await refresh() } }
-    func resume() { isPaused = false; scan() }
-    private var modelPath: String { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/sface.onnx").path }
-    func scan() {
-        guard enabled, !isPaused, !isAddingReferences, !isUpdatingFacePolicy, !isScanning, !isDetecting, pending > 0,
-              profiles.contains(where: { $0.references > 0 }), mayIndex(),
-              !ProcessInfo.processInfo.isLowPowerModeEnabled,
-              ProcessInfo.processInfo.thermalState != .serious, ProcessInfo.processInfo.thermalState != .critical else { return }
-        guard FileManager.default.fileExists(atPath: modelPath) else { problem = "The face model is missing from this app. Rebuild DigUp People."; return }
-        isScanning = true
+    func pause() { isPaused = true; waitingReason = nil; scanProgress = nil; scanner.cancel() }
+    func foldersChanged() {
+        scanProgress = nil
+        scanner.cancel()
         Task {
-            defer { isScanning = false }
+            await scanner.cancelAndWait()
+            await refresh()
+            scan()
+        }
+    }
+    func resume() { isPaused = false; scan() }
+    func indexingStatusChanged() {
+        if backgroundIndexingWaitReason() != nil { scanProgress = nil; scanner.cancel() }
+        scan()
+    }
+    private var modelPath: String { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/sface.onnx").path }
+    private func updateScanProgress(done: Int, total: Int) {
+        guard isScanning, !isPaused, !isAddingReferences, !isUpdatingFacePolicy, waitingReason == nil else { return }
+        scanProgress = EngineStatus.Progress(done: done, total: total)
+    }
+    func scan() {
+        let hasEnrolledPeople = profiles.contains(where: { $0.references > 0 })
+        guard enabled, !isPaused, !isAddingReferences, !isUpdatingFacePolicy, hasEnrolledPeople else {
+            waitingReason = nil
+            return
+        }
+        guard pending > 0 else { waitingReason = nil; return }
+        if ProcessInfo.processInfo.isLowPowerModeEnabled {
+            waitingReason = "Waiting for Low Power Mode to turn off"
+            scanProgress = nil
+            scanner.cancel()
+            return
+        }
+        if ProcessInfo.processInfo.thermalState == .serious || ProcessInfo.processInfo.thermalState == .critical {
+            waitingReason = "Waiting for the Mac to cool down"
+            scanProgress = nil
+            scanner.cancel()
+            return
+        }
+        if let reason = backgroundIndexingWaitReason() {
+            waitingReason = reason
+            scanProgress = nil
+            scanner.cancel()
+            return
+        }
+        guard hasAvailablePending else {
+            waitingReason = "Waiting for access to \(pending) photos"
+            scanProgress = nil
+            scanner.cancel()
+            return
+        }
+        waitingReason = nil
+        guard !isScanning, !isDetecting else { return }
+        guard FileManager.default.fileExists(atPath: modelPath) else { problem = "The face model is missing from this app. Rebuild Morrow."; return }
+        isScanning = true
+        scanProgress = nil
+        Task {
+            defer { isScanning = false; scanProgress = nil }
             guard enabled, !isPaused, !isDetecting else { return }
             do {
                 let selection = engine.faceSelection()
                 _ = try await scanner.run(arguments: ["face-index", "--index", settings.indexDirectory.path,
                     "--face-model", modelPath, "--limit", "40", "--min-face-pixels", String(minimumFacePixels), "--selection",
-                    String(decoding: try JSONEncoder().encode(selection), as: UTF8.self)])
+                    String(decoding: try JSONEncoder().encode(selection), as: UTF8.self)], onProgress: { done, total in
+                        await self.updateScanProgress(done: done, total: total)
+                    })
             } catch is CancellationError { }
             catch { if !isPaused && !isDetecting { problem = error.localizedDescription } }
             await refresh()

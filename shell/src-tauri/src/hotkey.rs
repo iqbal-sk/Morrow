@@ -1,21 +1,21 @@
 //! The panel's shortcut. Windows, macOS and X11 desktops let an app grab a key combination for itself (Tauri's global
-//! shortcut). Wayland doesn't let any app do that, so DigUp puts its shortcut where the desktop keeps them, where the
+//! shortcut). Wayland doesn't let any app do that, so Morrow puts its shortcut where the desktop keeps them, where the
 //! person can change or remove it: on GNOME (Wayland or X11) a custom shortcut in its keyboard settings that runs
-//! `DigUp --toggle`, which asks the DigUp already running to show or hide the panel; on KDE an action in its global
-//! shortcuts (KGlobalAccel), which signals DigUp while it runs. On other Wayland desktops the person adds a shortcut that
+//! `Morrow --toggle`, which asks the Morrow already running to show or hide the panel; on KDE an action in its global
+//! shortcuts (KGlobalAccel), which signals Morrow while it runs. On other Wayland desktops the person adds a shortcut that
 //! runs the command.
 
 use std::path::PathBuf;
 
-/// How the shortcut reaches DigUp on this desktop.
+/// How the shortcut reaches Morrow on this desktop.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // Windows and macOS always grab it
 pub enum Method {
-    /// DigUp grabs the keys itself.
+    /// Morrow grabs the keys itself.
     Grab,
     /// A custom shortcut in GNOME's keyboard settings runs `--toggle`.
     Gnome,
-    /// KDE's global shortcuts signal DigUp.
+    /// KDE's global shortcuts signal Morrow.
     Kde,
     /// The desktop lets no app set a shortcut: the person adds one that runs `--toggle`.
     ByHand,
@@ -67,13 +67,13 @@ fn quoted(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 
-/// `--toggle` while DigUp runs: the toggle goes to it over D-Bus, as a second launch's single-instance plugin would
-/// send it, but before this process starts GTK (the panel shows ~35 ms sooner). False when no DigUp answers.
+/// `--toggle` while Morrow runs: the toggle goes to it over D-Bus, as a second launch's single-instance plugin would
+/// send it, but before this process starts GTK (the panel shows ~35 ms sooner). False when no Morrow answers.
 #[cfg(target_os = "linux")]
 pub fn hand_over() -> bool {
     // tauri-plugin-single-instance 2.5's object: the app's identifier + ".SingleInstance", and that as a path.
-    const NAME: &str = "com.abdurrahim.DigUp.SingleInstance";
-    const PATH: &str = "/com/abdurrahim/DigUp/SingleInstance";
+    const NAME: &str = "com.iqbal.morrow.SingleInstance";
+    const PATH: &str = "/com/iqbal/morrow/SingleInstance";
     let Ok(connection) = zbus::blocking::Connection::session() else { return false };
     let args: Vec<String> = std::env::args().collect();
     let folder = std::env::current_dir().map(|folder| folder.display().to_string()).unwrap_or_default();
@@ -81,14 +81,14 @@ pub fn hand_over() -> bool {
 }
 
 /// GNOME's custom shortcuts (Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts), which its
-/// settings daemon runs on X11 and Wayland alike. DigUp keeps one entry of its own there.
+/// settings daemon runs on X11 and Wayland alike. Morrow keeps one entry of its own there.
 #[cfg(target_os = "linux")]
 pub mod gnome {
     use gio::prelude::*;
 
     const MEDIA_KEYS: &str = "org.gnome.settings-daemon.plugins.media-keys";
     const CUSTOM: &str = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding";
-    const OURS: &str = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/digup/";
+    const OURS: &str = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/morrow/";
 
     /// A GNOME session with its settings daemon's shortcut settings.
     pub fn available() -> bool {
@@ -103,7 +103,7 @@ pub mod gnome {
         list.strv("custom-keybindings").iter().any(|path| path.as_str() == OURS)
     }
 
-    /// DigUp's shortcut as GNOME has it now ("<Control><Shift>space"), if it's there.
+    /// Morrow's shortcut as GNOME has it now ("<Control><Shift>space"), if it's there.
     pub fn binding() -> Option<String> {
         if !listed(&gio::Settings::new(MEDIA_KEYS)) {
             return None;
@@ -111,7 +111,7 @@ pub mod gnome {
         Some(gio::Settings::with_path(CUSTOM, OURS).string("binding").to_string()).filter(|binding| !binding.is_empty())
     }
 
-    /// Adds DigUp's shortcut (`accelerator` in Tauri's form) running `command`. When it's there already, only the
+    /// Adds Morrow's shortcut (`accelerator` in Tauri's form) running `command`. When it's there already, only the
     /// command is brought up to date: a key the person chose in GNOME's settings stays.
     pub fn bind(accelerator: &str, command: &str) -> Result<(), String> {
         let list = gio::Settings::new(MEDIA_KEYS);
@@ -121,7 +121,7 @@ pub mod gnome {
         if new {
             set("binding", &to_gnome(accelerator)?)?;
         }
-        set("name", "DigUp")?;
+        set("name", "Morrow")?;
         set("command", command)?;
         if new {
             // Listed last, so GNOME never reads half an entry.
@@ -134,7 +134,7 @@ pub mod gnome {
         Ok(())
     }
 
-    /// Brings the command of DigUp's shortcut up to date when it's there (DigUp moved: a new AppImage, a new install).
+    /// Brings the command of Morrow's shortcut up to date when it's there (Morrow moved: a new AppImage, a new install).
     pub fn refresh(command: &str) {
         if listed(&gio::Settings::new(MEDIA_KEYS)) {
             let ours = gio::Settings::with_path(CUSTOM, OURS);
@@ -199,8 +199,8 @@ pub mod gnome {
     }
 }
 
-/// KDE's global shortcuts (System Settings → Shortcuts), which KDE's own apps register through KGlobalAccel: DigUp's
-/// component there has one action, the panel, with DigUp's shortcut as its default. A key the person sets there stays.
+/// KDE's global shortcuts (System Settings → Shortcuts), which KDE's own apps register through KGlobalAccel: Morrow's
+/// component there has one action, the panel, with Morrow's shortcut as its default. A key the person sets there stays.
 #[cfg(target_os = "linux")]
 pub mod kde {
     use zbus::blocking::{Connection, Proxy};
@@ -208,7 +208,7 @@ pub mod kde {
 
     const SERVICE: &str = "org.kde.kglobalaccel";
     /// The component, the action, and their names as System Settings shows them (sent as a slice: `as` on D-Bus).
-    const ACTION: [&str; 4] = ["com.abdurrahim.DigUp", "toggle-panel", "DigUp", "Show or Hide the Search Panel"];
+    const ACTION: [&str; 4] = ["com.iqbal.morrow", "toggle-panel", "Morrow", "Show or Hide the Search Panel"];
     // KGlobalAccel's flags (kglobalacceld.h), and Qt's modifiers in a key code.
     const SET_PRESENT: u32 = 2;
     const IS_DEFAULT: u32 = 8;
@@ -235,7 +235,7 @@ pub mod kde {
     }
 
     /// Registers the panel's action with `accelerator` (Tauri's form) as its default, then runs `pressed` on a thread of
-    /// its own each time the key is pressed while DigUp runs.
+    /// its own each time the key is pressed while Morrow runs.
     pub fn listen(accelerator: &str, pressed: impl Fn() + Send + 'static) -> Result<(), String> {
         let key = to_qt(accelerator)?;
         let (ready, answer) = std::sync::mpsc::channel();
@@ -274,14 +274,14 @@ pub mod kde {
         answer.recv().map_err(|_| "KDE's shortcut service didn't answer".to_string())?
     }
 
-    /// DigUp's key as KDE has it now ("Ctrl+Shift+Space"), once registered.
+    /// Morrow's key as KDE has it now ("Ctrl+Shift+Space"), once registered.
     pub fn current() -> Option<String> {
         let connection = Connection::session().ok()?;
         let keys: Vec<(Vec<i32>,)> = service(&connection).ok()?.call("shortcutKeys", &(ACTION.as_slice(),)).ok()?;
         keys.first().and_then(|(chords,)| chords.first()).map(|&key| shown(key))
     }
 
-    /// DigUp quits: the key is free again until it runs.
+    /// Morrow quits: the key is free again until it runs.
     pub fn stop() {
         if let Ok(connection) = Connection::session() {
             if let Ok(accel) = service(&connection) {

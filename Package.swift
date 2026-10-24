@@ -1,7 +1,7 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
-// DigUp builds on macOS (the app, the CLI and its helpers) and, since the port, the engine and the CLI on
+// Morrow builds on macOS (the app, the CLI and its helpers) and, since the port, the engine and the CLI on
 // Linux and Windows too. The manifest picks each platform's pieces: how llama.cpp is linked, the C libraries the engine
 // needs where Apple's frameworks aren't there (SQLite, stb, miniz, PDFium: scripts/fetch-vendor.sh puts them in
 // Vendor/), and the app, which is macOS only.
@@ -62,8 +62,10 @@ let faceDependencies: [Target.Dependency] = ["FaceRuntime"]
 let appTargets: [Target] = [
     .target(name: "FaceRuntime", dependencies: ["DigUpKit", .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")]),
     .testTarget(name: "FaceRuntimeTests", dependencies: ["FaceRuntime", "DigUpKit"]),
-    // The menubar + hotkey app. build.sh wraps it into build.noindex/DigUp.app. (The product can't be called
-    // "DigUp": on a case-insensitive disk it would collide with the `digup` CLI binary.)
+    .testTarget(name: "DigUpAppTests", dependencies: ["DigUpApp", "DigUpKit"],
+                swiftSettings: [.defaultIsolation(MainActor.self)]),
+    // The menubar + hotkey app. build.sh wraps it into build.noindex/Morrow.app. (The product can't be called
+    // "Morrow": on a case-insensitive disk it would collide with the `digup` CLI binary.)
     .executableTarget(
         name: "DigUpApp",
         dependencies: ["DigUpKit", .product(name: "Sparkle", package: "Sparkle")],
@@ -79,7 +81,7 @@ let appTargets: [Target] = []
 #endif
 
 let package = Package(
-    name: "DigUp",
+    name: "Morrow",
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "digup", targets: ["digup"]),

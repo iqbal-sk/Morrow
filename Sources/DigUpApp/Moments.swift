@@ -99,7 +99,7 @@ extension Engine {
 /// Opens a result in its app:
 /// - a PDF page: with words from that page to search for, as Spotlight opens documents (Preview fills its search with
 ///   them and lists the matches by page; it doesn't go to the first one by itself, checked 2026-10-08)
-/// - a moment in QuickTime Player: it's asked to go there (macOS asks once whether DigUp may control it; without
+/// - a moment in QuickTime Player: it's asked to go there (macOS asks once whether Morrow may control it; without
 ///   that, the recording opens at the start)
 /// - a moment in IINA: its URL scheme takes a start time
 enum Opener {

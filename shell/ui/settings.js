@@ -1,4 +1,4 @@
-// DigUp's Settings window, its tabs after the Mac app's (Sources/DigUpApp/SettingsWindow.swift). General: opening at
+// Morrow's Settings window, its tabs after the Mac app's (Sources/DigUpApp/SettingsWindow.swift). General: opening at
 // login, centering the search panel where the desktop places windows itself (it costs memory, so it's a choice), where
 // the shortcut lives, and updates. Folders: how indexing goes (with Pause), each folder searched and how far along it is, the
 // folders and file types skipped, and the set hours. Code: code search's folders (added in setup's folder list for code),
@@ -12,9 +12,9 @@ const isWindows = /Win/.test(navigator.platform);
 const $ = (id) => document.getElementById(id);
 
 const notes = {
-  gnome: "DigUp added it to GNOME's keyboard shortcuts. To change it: Settings → Keyboard → View and Customize " +
+  gnome: "Morrow added it to GNOME's keyboard shortcuts. To change it: Settings → Keyboard → View and Customize " +
     "Shortcuts → Custom Shortcuts.",
-  kde: "DigUp added it to KDE's shortcuts. To change it: System Settings → Shortcuts → DigUp.",
+  kde: "Morrow added it to KDE's shortcuts. To change it: System Settings → Shortcuts → Morrow.",
   by_hand: "This desktop doesn't let apps set their own shortcuts. To open the panel with one, add a shortcut in its " +
     "keyboard settings that runs:",
 };
@@ -56,38 +56,9 @@ function renderGeneral() {
   $("shortcut-command").textContent = info.shortcut.command;
   $("change-shortcut").hidden = info.shortcut.method !== "grab" || recording;
   $("recording").hidden = !recording;
-  renderUpdates();
-}
-
-/// Updates: the daily check, and this version or the one waiting (updates.rs).
-function renderUpdates() {
-  $("update-checks").checked = info.updateChecks;
-  $("update-info").textContent = "Once a day DigUp asks GitHub for its newest version; nothing about your files is sent. "
-    + (info.installsUpdates ? "Updates install with one click."
-      : "A new version is downloaded from its release page and installed as this one was.");
-  const update = info.state && info.state.update;
-  const version = $("update-version");
-  version.classList.toggle("available", Boolean(update));
-  version.textContent = !update ? `DigUp ${info.version}`
-    : update.state === "downloading" ? `Downloading DigUp ${update.version}…` + (update.percent != null ? ` ${update.percent}%` : "")
-    : update.state === "installing" ? `Installing DigUp ${update.version}…` : `DigUp ${update.version} is available`;
 }
 
 $("licenses").onclick = () => invoke("open_licenses").catch(fail);
-
-$("update-version").onclick = () => {
-  if (info.state && info.state.update) invoke("offer_update").catch(fail);
-};
-$("check-now").onclick = async () => {
-  $("problem").hidden = true;
-  $("check-now").disabled = true;
-  try {
-    await invoke("check_for_updates");
-  } catch (error) {
-    fail(error);
-  }
-  $("check-now").disabled = false;
-};
 
 /// A switch: the shell does it, or the box goes back and says why.
 function wire(box, command) {
@@ -105,7 +76,6 @@ function wire(box, command) {
 wire($("login"), "set_open_at_login");
 wire($("center"), "set_center_panel");
 wire($("processor"), "set_processor_only");
-wire($("update-checks"), "set_update_checks");
 for (const choice of document.querySelectorAll('input[name="tray-click"]')) {
   choice.addEventListener("change", () => {
     $("problem").hidden = true;
@@ -113,7 +83,7 @@ for (const choice of document.querySelectorAll('input[name="tray-click"]')) {
   });
 }
 
-// MARK: The shortcut (where DigUp grabs it itself: Windows, X11; shortcut.js)
+// MARK: The shortcut (where Morrow grabs it itself: Windows, X11; shortcut.js)
 
 let recording = false;
 
@@ -159,7 +129,7 @@ async function loadSummaries() {
 function renderFolders() {
   const rows = $("folder-rows");
   rows.replaceChildren();
-  if (!info.folders?.length) rows.append(element("div", "empty", "No folders yet. Add the ones DigUp should search."));
+  if (!info.folders?.length) rows.append(element("div", "empty", "No folders yet. Add the ones Morrow should search."));
   for (const folder of info.folders || []) {
     const summary = (summaries || []).find((item) => samePath(item.path, folder)) || null;
     rows.append(folderRow(folder, summary));
@@ -196,7 +166,7 @@ function renderFields() {
 /// One line per reason: what the crawl never queued from the folder, then what was skipped once read.
 function reasonLines(leftOut, skippedReasons) {
   const crawl = {
-    "other type": "of types DigUp doesn't read",
+    "other type": "of types Morrow doesn't read",
     "app or bundle": "inside apps or bundles",
     "Photos library": "in a Photos library",
     "link or special file": "links or special files",
@@ -434,7 +404,7 @@ function renderStorage() {
   pathButton($("model-path"), storage.models);
   $("index-size").textContent = bytes(storage.indexBytes || 0) + (storage.codeBytes ? ` (code ${bytes(storage.codeBytes)})` : "");
   pathButton($("index-path"), storage.index);
-  $("version").textContent = `DigUp ${info.version || ""} · EmbeddingGemma 2 by Google (Apache 2.0), run by llama.cpp (MIT).`;
+  $("version").textContent = `Morrow ${info.version || ""} · EmbeddingGemma 2 by Google (Apache 2.0), run by llama.cpp (MIT).`;
   $("licenses").hidden = !info.licenses;
 }
 
@@ -530,7 +500,6 @@ tauri.event.listen("state", ({ payload }) => {
   info.state = payload;
   renderStatus();
   renderStorage();
-  renderUpdates();
   // The code index's progress isn't in the state: its folders are asked again while the tab is up.
   const counts = payload.searchable !== before.searchable || payload.pending !== before.pending;
   const load = !$("folders").hidden && counts ? loadSummaries : !$("code").hidden ? loadCodeSummaries : null;

@@ -1,7 +1,7 @@
 import DigUpKit
 import Foundation
 
-/// `digup download-model [--to DIR]`: the model files into DIR (default: DigUp's own Models folder), for shells that
+/// `digup download-model [--to DIR]`: the model files into DIR (default: Morrow's own Models folder), for shells that
 /// set DigUp up on first launch (the Mac app downloads them itself, with the same `FileFetcher`). A file already in the
 /// Hugging Face cache is copied from there; anything else is downloaded, picking up where an earlier try stopped. Every
 /// file is checked (size, SHA-256) before it gets its name, so a file there is a good one.

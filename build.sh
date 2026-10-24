@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds build.noindex/DigUp.app, signed with the hardened runtime (as releases are, so dev builds behave the same).
+# Builds build.noindex/Morrow.app, signed with the hardened runtime (as releases are, so dev builds behave the same).
 #   ./build.sh                       signed with the identity named in .sign-id (one line, gitignored), so macOS keeps
 #                                    folder permissions across rebuilds; ad-hoc without it (macOS then asks again
 #                                    after each build)
@@ -7,14 +7,49 @@
 #   RELEASE=1 SIGN_ID="Developer ID Application: …" ./build.sh   plus the secure timestamp notarization needs
 #                                    (scripts/release.sh does that, then notarizes and makes the DMG)
 # There's no install step: run it from build.noindex (see scripts/dev-run.sh).
-# For testing in-app updates with a copy of its own (never the installed DigUp's settings or updates), these replace
+# For testing in-app updates with a copy of its own (never the installed Morrow's settings or updates), these replace
 # Info.plist values: BUNDLE_ID, VERSION, BUILD_NUMBER, SPARKLE_FEED (the appcast URL), SPARKLE_KEY (the EdDSA public key).
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP_NAME="DigUp People"
+APP_NAME="Morrow"
 # ".noindex" keeps Spotlight (and the Apps list) from showing this staging copy.
-APP="build.noindex/$APP_NAME.app"
+# APP_PATH lets a release or review build keep its candidate beside the normal dev app. Keep it under build.noindex:
+# this path is removed before each build.
+REPO_ROOT="$(pwd -P)"
+if [[ -L build.noindex ]]; then
+  echo "build.noindex must be a real directory, not a symlink" >&2
+  exit 1
+fi
+mkdir -p build.noindex
+BUILD_ROOT="$(cd -P build.noindex && pwd)"
+if [[ "$BUILD_ROOT" != "$REPO_ROOT/build.noindex" ]]; then
+  echo "build.noindex resolves outside this repository" >&2
+  exit 1
+fi
+APP="${APP_PATH:-$BUILD_ROOT/$APP_NAME.app}"
+[[ "$APP" == /* ]] || APP="$REPO_ROOT/$APP"
+case "$APP" in
+  "$BUILD_ROOT"/*.app) ;;
+  *) echo "APP_PATH must name an app bundle inside $BUILD_ROOT" >&2; exit 1 ;;
+esac
+case "/${APP#"$BUILD_ROOT"/}/" in
+  *"/../"*) echo "APP_PATH must not contain parent-directory traversal" >&2; exit 1 ;;
+esac
+APP_PARENT="$(dirname "$APP")"
+ANCESTOR="$APP_PARENT"
+while [[ ! -d "$ANCESTOR" ]]; do ANCESTOR="$(dirname "$ANCESTOR")"; done
+ANCESTOR_REAL="$(cd -P "$ANCESTOR" && pwd)"
+case "$ANCESTOR_REAL" in
+  "$BUILD_ROOT"|"$BUILD_ROOT"/*) ;;
+  *) echo "APP_PATH resolves outside build.noindex" >&2; exit 1 ;;
+esac
+mkdir -p "$APP_PARENT"
+APP_PARENT_REAL="$(cd -P "$APP_PARENT" && pwd)"
+case "$APP_PARENT_REAL" in
+  "$BUILD_ROOT"|"$BUILD_ROOT"/*) ;;
+  *) echo "APP_PATH resolves outside build.noindex" >&2; exit 1 ;;
+esac
 
 # Use full Xcode's toolchain when it's installed, even if xcode-select points at the Command Line Tools.
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
@@ -24,13 +59,18 @@ fi
 # llama.cpp, the embedding runtime, linked into the helper (only rebuilt when its tag or patch changes).
 scripts/build-llama.sh
 bash scripts/fetch-face-model.sh
+# Regenerate all icon formats from the same paths used by the in-app launch animation.
+mkdir -p .build
+xcrun swiftc Sources/DigUpApp/RevealSymbol.swift scripts/render-reveal-icon.swift -o .build/morrow-render-reveal
+.build/morrow-render-reveal
+swift scripts/render-icon.swift
 
 # Both executables: the app, and the `digup` CLI, which the app runs as its indexing helper and query encoder.
 swift build -c release --product DigUpApp
 swift build -c release --product digup
 BIN_DIR="$(swift build -c release --show-bin-path)"
 
-# The app icon ("One space", moss; Resources/AppIcon/README.md): macOS 26 draws the layered AppIcon.icon (compiled into
+# The peach/coral app icon (Resources/AppIcon/README.md): macOS 26 draws the layered AppIcon.icon (compiled into
 # Assets.car), older macOS the .icns. Without the former, macOS 26 shows the icon shrunk inside a gray square.
 ICON="Resources/AppIcon.icns"
 
@@ -38,7 +78,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 # The binary is DigUpApp in SwiftPM (it can't share a name with the `digup` CLI on a case-insensitive disk).
 cp "$BIN_DIR/DigUpApp" "$APP/Contents/MacOS/$APP_NAME"
-# The indexing helper lives in Helpers/: next to DigUp in MacOS/ it would collide on a case-insensitive disk.
+# The indexing helper lives in Helpers/: next to Morrow in MacOS/ it would collide on a case-insensitive disk.
 cp "$BIN_DIR/digup" "$APP/Contents/Helpers/digup"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 xcrun actool --compile "$APP/Contents/Resources" --platform macosx --target-device mac --minimum-deployment-target 14.0 \
@@ -58,9 +98,9 @@ ditto .build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sp
 for part in XPCServices Headers PrivateHeaders Modules; do rm -rf "${FW:?}/$part" "${FW:?}/Versions/B/$part"; done
 
 PLIST="$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier local.iqbal.DigUpPeople" "$PLIST"
-/usr/libexec/PlistBuddy -c "Set :CFBundleName DigUp People" "$PLIST"
-/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName DigUp People" "$PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.iqbal.morrow" "$PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName Morrow" "$PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Morrow" "$PLIST"
 /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $APP_NAME" "$PLIST"
 # A personal fork must not install an upstream update over its people-enabled build.
 /usr/libexec/PlistBuddy -c "Delete :SUFeedURL" "$PLIST" 2>/dev/null || true
@@ -84,10 +124,10 @@ for code in "$FW/Versions/B/Autoupdate" "$FW/Versions/B/Updater.app" "$FW"; do
 done
 # An ad-hoc build has no team, so the hardened runtime's library validation would refuse its (ad-hoc) Sparkle: such
 # builds (from source, without a signing identity) may load it anyway. Signed builds and releases keep validation.
-ENTITLEMENTS=Resources/DigUp.entitlements
+ENTITLEMENTS=Resources/Morrow.entitlements
 if [[ "$IDENTITY" == - ]]; then
-  ENTITLEMENTS="$(mktemp -d)/DigUp.entitlements"
-  cp Resources/DigUp.entitlements "$ENTITLEMENTS"
+  ENTITLEMENTS="$(mktemp -d)/Morrow.entitlements"
+  cp Resources/Morrow.entitlements "$ENTITLEMENTS"
   /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" "$ENTITLEMENTS"
 fi
 codesign --force --sign "$IDENTITY" --options runtime $TIMESTAMP --entitlements "$ENTITLEMENTS" "$APP"

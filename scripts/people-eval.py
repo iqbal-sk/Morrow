@@ -304,12 +304,12 @@ def markdown_report(report):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", type=Path, default=Path.home() / "Desktop/DigUp-Face-Test")
+    parser.add_argument("--dataset", type=Path, default=Path.home() / "Desktop/Morrow-Face-Test")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--smoke-image", type=Path, help="Check the pipelines on one image, without reporting identity accuracy")
     parser.add_argument("--gemma-helper", type=Path)
     parser.add_argument("--gemma-budget", type=int, choices=[70, 140, 280, 560, 1120], default=140)
-    parser.add_argument("--models", type=Path, default=Path.home() / "Library/Application Support/DigUp/Models")
+    parser.add_argument("--models", type=Path, default=Path.home() / "Library/Application Support/Morrow/Models")
     parser.add_argument("--without-gemma", action="store_true", help="Explicitly run only the CV baselines")
     args = parser.parse_args()
     if args.smoke_image:
@@ -329,7 +329,7 @@ def main():
     vectors, crops, vision_crops, full, prints, detections, timings = collect(items, run, model_paths, helper, bool(args.smoke_image))
     names, gemma_info = {}, None
     if not args.without_gemma:
-        candidates = [args.gemma_helper] if args.gemma_helper else [ROOT / ".build/release/digup", Path("/Applications/DigUp.app/Contents/Helpers/digup"), Path("/Volumes/DigUp/DigUp.app/Contents/Helpers/digup")]
+        candidates = [args.gemma_helper] if args.gemma_helper else [ROOT / ".build/release/digup", Path("/Applications/Morrow.app/Contents/Helpers/digup"), Path("/Volumes/Morrow/Morrow.app/Contents/Helpers/digup")]
         executable = next((p for p in candidates if p and p.is_file()), None)
         if executable is None:
             raise ValueError("Gemma helper not found; supply --gemma-helper /path/to/digup or explicitly use --without-gemma")

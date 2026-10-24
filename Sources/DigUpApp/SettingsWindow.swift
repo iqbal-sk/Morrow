@@ -25,10 +25,19 @@ enum SettingsTab: String, CaseIterable {
         case .storage: "internaldrive"
         }
     }
+
+    var detail: String {
+        switch self {
+        case .general: "Keyboard and launch behavior."
+        case .folders: "Choose folders, follow indexing, and rebuild selected data."
+        case .people: "On-device face scanning and matching preferences."
+        case .code: "Search inside selected repositories."
+        case .storage: "Local models, indexes, and privacy."
+        }
+    }
 }
 
-/// Settings, the way Mac apps lay them out: a toolbar of tabs, and the window sized to each one. Folders is also where
-/// the index shows how far along it is, folder by folder.
+/// A resizable native Settings window. Enrollment and review belong to the main People workspace.
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     let state: SettingsState
     /// Folders → Add Folders…, a sheet on this window.
@@ -37,7 +46,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     let codeSheet: AddFoldersController
     private unowned let app: AppController
     private var window: NSWindow?
-    private var tabs: NSTabViewController?
 
     init(app: AppController) {
         self.app = app
@@ -67,10 +75,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     var isVisible: Bool { window?.isVisible == true }
 
-    func show(_ tab: SettingsTab = .general) {
+    func show(_ tab: SettingsTab? = nil) {
         let window = self.window ?? makeWindow()
-        tabs?.selectedTabViewItemIndex = SettingsTab.allCases.firstIndex(of: tab) ?? 0
-        state.tab = tab
+        if let tab { state.tab = tab }
         Task { await state.refresh() }
         app.present(window)
     }
@@ -78,39 +85,26 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     var selectedTab: SettingsTab { state.tab }
 
     private func makeWindow() -> NSWindow {
-        let tabs = NSTabViewController()
-        tabs.tabStyle = .toolbar
-        tabs.transitionOptions = [.allowUserInteraction]
-        for tab in SettingsTab.allCases {
-            let controller = NSHostingController(rootView: SettingsPane(tab: tab, state: state))
-            controller.sizingOptions = .preferredContentSize
-            controller.title = tab.title   // the window takes the selected tab's title
-            let item = NSTabViewItem(viewController: controller)
-            item.label = tab.title
-            item.image = NSImage(systemSymbolName: tab.symbol, accessibilityDescription: tab.title)
-            item.identifier = tab.rawValue
-            tabs.addTabViewItem(item)
-        }
-        let window = NSWindow(contentViewController: tabs)
-        window.styleMask = [.titled, .closable]
-        window.toolbarStyle = .preference
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 720),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.title = "Morrow Settings"
+        window.toolbarStyle = .unified
+        window.titlebarAppearsTransparent = true
+        window.minSize = NSSize(width: 760, height: 540)
+        window.contentView = NSHostingView(rootView: SettingsRoot(state: state))
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.center()
-        self.tabs = tabs
         self.window = window
-        state.selectTab = { [weak self] tab in
-            self?.tabs?.selectedTabViewItemIndex = SettingsTab.allCases.firstIndex(of: tab) ?? 0
-        }
+        state.selectTab = { [weak self] tab in self?.state.tab = tab }
         return window
     }
 
     func windowWillClose(_ notification: Notification) {
         addSheet.end()
         codeSheet.end()
-        window?.contentViewController = nil
+        window?.contentView = nil
         window = nil
-        tabs = nil
         app.windowClosed()
     }
 
@@ -121,14 +115,18 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
 @Observable
 final class SettingsState {
-    var tab = SettingsTab.general
+    var tab = SettingsTab.general {
+        willSet {
+            if newValue != tab { animatesNavigation = !MorrowMotion.keyboardInitiated }
+        }
+    }
+    private(set) var animatesNavigation = true
     private(set) var summaries: [Engine.RootSummary]?
     private(set) var codeSummaries: [Engine.RootSummary] = []
     private(set) var indexSize: Int64 = 0
     private(set) var codeIndexSize: Int64 = 0
     var launchAtLogin = false
     var loginProblem: String?
-    var checksForUpdates = false
     @ObservationIgnored let app: AppController
     @ObservationIgnored var selectTab: (SettingsTab) -> Void = { _ in }
     @ObservationIgnored var addFolders: () -> Void = {}
@@ -146,7 +144,6 @@ final class SettingsState {
     func refresh() async {
         lastRefresh = Date()
         launchAtLogin = app.launchesAtLogin
-        checksForUpdates = app.updates.automaticallyChecks
         indexSize = app.engine.indexSize
         codeIndexSize = app.engine.codeIndexSize
         codeSummaries = await app.engine.rootSummaries(code: true)
@@ -169,36 +166,83 @@ final class SettingsState {
     var isLoaded: Bool { summaries != nil }
 }
 
-/// One tab's content, at the width every tab shares.
-private struct SettingsPane: View {
-    let tab: SettingsTab
-    let state: SettingsState
-    /// The content's own height. The window is that tall up to what the screen has room for, and scrolls past it (a
-    /// long list of folders ran it off the screen, Add Folders… with it).
-    @State private var height: CGFloat?
-
+private struct SettingsRoot: View {
+    @Bindable var state: SettingsState
     var body: some View {
-        ScrollView(.vertical) {
-            Group {
-                switch tab {
-                case .general: GeneralSettings(state: state)
-                case .folders: FolderSettings(state: state)
-                case .people: PeopleSettings(people: state.app.people, search: { state.app.searchWindow.show(query: $0) })
-                case .code: CodeSettings(state: state)
-                case .storage: StorageSettings(state: state)
+        NavigationSplitView {
+            List(selection: Binding<SettingsTab?>(get: { state.tab }, set: { tab in
+                if let tab { state.tab = tab }
+            })) {
+                ForEach(SettingsTab.allCases, id: \.self) { tab in
+                    Label(tab.title, systemImage: tab.symbol).tag(tab)
                 }
+            }.listStyle(.sidebar)
+                .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 230)
+        } detail: {
+            MorrowPageDeck(selection: state.tab, animated: state.animatesNavigation) {
+                settingsPage
             }
-            .frame(width: 580)
-            .fixedSize(horizontal: false, vertical: true)
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
-        }
-        .scrollBounceBehavior(.basedOnSize)
-        .frame(width: 580, height: height.map { min($0, Self.tallest) })
+        }.morrowTheme()
+            .onChange(of: state.model.status) { state.statusChanged() }
     }
 
-    /// The screen's room below the menu bar, less the window's title bar and tabs and a margin.
-    private static var tallest: CGFloat {
-        (NSScreen.main?.visibleFrame.height ?? 800) - 140
+    private var settingsPage: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(state.tab.title).font(.system(size: 28, weight: .semibold, design: .rounded))
+                Text(state.tab.detail).font(.callout).foregroundStyle(.secondary)
+            }.padding(.horizontal, 24).padding(.top, 28).padding(.bottom, 8)
+            // Each native Form owns its scrolling. Disabling a Form inside another ScrollView
+            // makes its lower sections unreachable when the settings window is short.
+            switch state.tab {
+            case .general: GeneralSettings(state: state)
+            case .folders: FolderSettings(state: state)
+            case .people:
+                ScrollView {
+                    PeoplePreferences(people: state.app.people) {
+                        state.app.searchWindow.show(destination: .people)
+                    }
+                }.scrollBounceBehavior(.basedOnSize)
+            case .code: CodeSettings(state: state)
+            case .storage: StorageSettings(state: state)
+            }
+        }.frame(maxWidth: 760, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct PeoplePreferences: View {
+    @Bindable var people: PeopleCoordinator
+    let openPeople: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            if let problem = people.problem {
+                Label(problem, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.red)
+            }
+            GroupBox {
+                VStack(alignment: .leading, spacing: 14) {
+                    Toggle("Enable People search", isOn: $people.enabled).toggleStyle(.switch)
+                    Text("Match faces to the people you add. Photos, references and identity matches stay on this Mac.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Button("Open People…", action: openPeople)
+                }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GroupBox("Face detection") {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Minimum face size")
+                        Spacer()
+                        Text(people.minimumFacePixels == 0 ? "All sizes" : "\(people.minimumFacePixels) px").monospacedDigit()
+                    }
+                    Slider(value: Binding(get: { Double(people.minimumFacePixels) }, set: { people.setMinimumFacePixels(Int($0)) }), in: 0...128, step: 8)
+                        .accessibilityLabel("Minimum face size in pixels")
+                    Text(people.isUpdatingFacePolicy ? "Applying the filter and rechecking your photos…" : "Smaller faces are skipped. Changing this rechecks photos in your chosen folders; zero keeps every face.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.padding(12)
+            }
+            Label("File preparation and face scanning have separate progress in Activity.", systemImage: "info.circle")
+                .font(.callout).foregroundStyle(.secondary)
+        }.padding(24)
     }
 }
 
@@ -226,57 +270,50 @@ private struct GeneralSettings: View {
                     state.launchAtLogin = state.app.launchesAtLogin
                 })) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Open DigUp when you log in")
+                        Text("Open Morrow when you log in")
                         Text(state.loginProblem ?? "So the shortcut always works.")
                             .font(.system(size: 11))
                             .foregroundStyle(state.loginProblem == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
                     }
                 }
             }
-            Section {
-                Toggle(isOn: Binding(get: { state.checksForUpdates }, set: { on in
-                    state.app.updates.automaticallyChecks = on
-                    state.checksForUpdates = on
-                })) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Check for updates automatically")
-                        Text("Once a day DigUp asks GitHub for its newest version; nothing about your files is sent. "
-                             + "Updates install with one click.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                LabeledContent {
-                    Button("Check Now") { state.app.updates.checkNow() }
-                } label: {
-                    Text(state.model.updateAvailable.map { "DigUp \($0) is available" }
-                         ?? "DigUp \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
-                }
-            }
         }
         .formStyle(.grouped)
-        .scrollDisabled(true)
     }
 }
 
 private struct FolderSettings: View {
     @Bindable var state: SettingsState
     @State private var removing: Engine.RootSummary?
+    @State private var folderAlert: FolderAlert?
+
+    private enum FolderAlert {
+        case reset(URL)
+        case outsideIndexedFolders(URL)
+    }
 
     var body: some View {
         Form {
             Section {
                 IndexProgress(model: state.model) { state.app.engine.setPaused(!state.model.status.paused) }
+                HStack(spacing: 12) {
+                    IndexingTrackerRow(title: "People search", detail: state.app.people.scanStatusLine,
+                                       symbol: "person.crop.rectangle.stack", progress: state.app.people.scanProgressFraction)
+                    Button("View Activity") {
+                        state.app.searchWindow.show(destination: .activity)
+                    }
+                }
             }
             Section {
                 if let summaries = state.summaries {
                     if summaries.isEmpty {
-                        Text("No folders yet. Add the ones DigUp should search.")
+                        Text("No folders yet. Add the ones Morrow should search.")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(summaries) { summary in
-                        FolderStatusRow(summary: summary) { removing = summary }
+                        FolderStatusRow(summary: summary,
+                                        reset: { state.app.engine.resetIndex(under: URL(fileURLWithPath: summary.path)) },
+                                        remove: { removing = summary })
                     }
                 } else {
                     ProgressView().controlSize(.small).frame(maxWidth: .infinity)
@@ -289,6 +326,20 @@ private struct FolderSettings: View {
                         Label("Add Folders…", systemImage: "plus")
                     }
                     Spacer()
+                    Button {
+                        state.app.pickFolderToReset(for: NSApp.keyWindow) { folder in
+                            guard let folder else { return }
+                            let selection = FolderSelection(chosen: state.model.settings.roots.map(\.path),
+                                                            skipped: state.model.settings.excludedFolders.map(\.path))
+                            let codeSelection = FolderSelection(chosen: state.model.settings.codeRoots.map(\.path),
+                                                                skipped: state.model.settings.codeExcluded.map(\.path))
+                            folderAlert = (selection.isSearched(folder.path) || codeSelection.isSearched(folder.path))
+                                ? .reset(folder) : .outsideIndexedFolders(folder)
+                        }
+                    } label: {
+                        Label("Reset Directory…", systemImage: "arrow.counterclockwise")
+                    }
+                    .disabled(state.model.settings.roots.isEmpty && state.model.settings.codeRoots.isEmpty)
                 }
             }
             Section {
@@ -333,7 +384,7 @@ private struct FolderSettings: View {
             } header: {
                 Text("Skip these file types")
             } footer: {
-                Text("DigUp only reads pictures, PDFs, documents (txt, md, typ, rtf, docx, odt, html), audio and video here; "
+                Text("Morrow only reads pictures, PDFs, documents (txt, md, typ, rtf, docx, odt, html), audio and video here; "
                      + "code is read only in the code folders (the Code tab). Keys, certificates and password files are "
                      + "never read, nor are hidden folders like ~/.ssh.")
                     .font(.system(size: 11))
@@ -376,8 +427,6 @@ private struct FolderSettings: View {
             }
         }
         .formStyle(.grouped)
-        .scrollDisabled(true)
-        .onChange(of: state.model.status) { state.statusChanged() }
         .confirmationDialog(removalTitle, isPresented: Binding(get: { removing != nil },
                                                                set: { if !$0 { removing = nil } })) {
             Button("Remove", role: .destructive) {
@@ -388,6 +437,33 @@ private struct FolderSettings: View {
         } message: {
             Text("Its \(removing?.files.formatted() ?? "") files leave the index. Adding it back later indexes them "
                  + "again.")
+        }
+        .alert(folderAlertTitle, isPresented: Binding(get: { folderAlert != nil },
+                                                       set: { if !$0 { folderAlert = nil } })) {
+            if case .reset(let folder) = folderAlert {
+                Button("Reset Directory Index", role: .destructive) {
+                    state.app.engine.resetIndex(under: folder)
+                    folderAlert = nil
+                }
+            }
+            Button("Cancel", role: .cancel) { folderAlert = nil }
+        } message: {
+            switch folderAlert {
+            case .reset(let folder):
+                Text("Morrow will remove indexed data for “\(folder.lastPathComponent)” and its contents, then index that folder again. People names and reference photos are kept.")
+            case .outsideIndexedFolders(let folder):
+                Text("“\(folder.path)” is not inside a folder Morrow currently searches, so it has no index data to reset here.")
+            case nil:
+                Text("")
+            }
+        }
+    }
+
+    private var folderAlertTitle: String {
+        switch folderAlert {
+        case .reset(let folder): "Reset the index for “\(folder.lastPathComponent)”?"
+        case .outsideIndexedFolders: "Folder isn’t indexed"
+        case nil: ""
         }
     }
 
@@ -436,6 +512,7 @@ private struct IndexProgress: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
+                Text("File search").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
                 Text(model.statusLine).font(.system(size: 13, weight: .semibold))
                 if let progress = model.progress {
                     ProgressView(value: progress).controlSize(.small)
@@ -466,8 +543,10 @@ private struct IndexProgress: View {
 
 private struct FolderStatusRow: View {
     let summary: Engine.RootSummary
+    let reset: () -> Void
     let remove: () -> Void
     @State private var showingReasons = false
+    @State private var confirmingReset = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -503,7 +582,7 @@ private struct FolderStatusRow: View {
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 2) {
                 Text(summary.missing || summary.unreadable ? "Kept for when it's back"
-                     : "\(summary.indexed.formatted()) of \(summary.files.formatted()) indexed")
+                     : "\(summary.indexed.formatted()) of \(summary.files.formatted()) searchable")
                     .font(.system(size: 12, weight: .medium).monospacedDigit())
                 if !states.isEmpty {
                     if reasons.isEmpty {
@@ -530,14 +609,28 @@ private struct FolderStatusRow: View {
                     }
                 }
             }
-            Button(action: remove) {
-                Image(systemName: "minus.circle.fill").foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Button { confirmingReset = true } label: {
+                    Image(systemName: "arrow.counterclockwise.circle").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Reset the index for this folder")
+                .accessibilityLabel("Reset index for \((summary.path as NSString).lastPathComponent)")
+                Button(action: remove) {
+                    Image(systemName: "minus.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Stop searching this folder")
+                .accessibilityLabel("Remove \((summary.path as NSString).lastPathComponent)")
             }
-            .buttonStyle(.plain)
-            .help("Stop searching this folder")
-            .accessibilityLabel("Remove \((summary.path as NSString).lastPathComponent)")
         }
         .padding(.vertical, 2)
+        .confirmationDialog("Reset the index for “\((summary.path as NSString).lastPathComponent)”?",
+                            isPresented: $confirmingReset) {
+            Button("Reset Folder Index", role: .destructive, action: reset)
+        } message: {
+            Text("Morrow will remove indexed data for this folder and its contents, then index it again when available. People names and reference photos are kept.")
+        }
     }
 
     private var states: String {
@@ -553,7 +646,7 @@ private struct FolderStatusRow: View {
     /// One line per reason: what the crawl never queued from this folder, then what was skipped once read.
     private var reasons: [String] {
         let crawl: [String: String] = [
-            "other type": "of types DigUp doesn't read",
+            "other type": "of types Morrow doesn't read",
             "app or bundle": "inside apps or bundles",
             "Photos library": "in a Photos library (its photos aren't read yet)",
             "link or special file": "links or special files",
@@ -574,6 +667,7 @@ private struct FolderStatusRow: View {
 
 private struct StorageSettings: View {
     let state: SettingsState
+    @State private var confirmingIndexReset = false
 
     var body: some View {
         Form {
@@ -603,7 +697,7 @@ private struct StorageSettings: View {
                 if !state.model.download.isReady {
                     HStack(alignment: .firstTextBaseline) {
                         Text("If your network blocks Hugging Face, download the two files on another network and "
-                             + "click Use Files… to choose them. DigUp checks them before it uses them.")
+                             + "click Use Files… to choose them. Morrow checks them before it uses them.")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -618,6 +712,16 @@ private struct StorageSettings: View {
                 }
             }
             Section("Index") {
+                LabeledContent {
+                    Button("Reset Index", role: .destructive) { confirmingIndexReset = true }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Rebuild all indexed folders")
+                        Text("Clears indexed file data, then indexes your chosen folders again.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 LabeledContent("Size on disk", value: bytes(state.indexSize))
                 if state.model.hasCode {
                     LabeledContent("Code index", value: bytes(state.codeIndexSize))
@@ -627,21 +731,26 @@ private struct StorageSettings: View {
                 }
             }
             Section("Privacy") {
-                Text("DigUp reads the folders you choose and keeps what it learns in its index, on this Mac. "
-                     + "It goes online only to download its model, once, and to check for updates (General), "
-                     + "which sends nothing about your files.")
+                Text("Morrow reads only the folders you choose. Search and face matching run on this Mac; "
+                     + "the index and people you add stay here. It goes online only to download its model.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section {
-                Text("DigUp \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · "
+                Text("Morrow \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · "
                      + "EmbeddingGemma 2 by Google (Apache 2.0), run by llama.cpp (MIT).")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        .scrollDisabled(true)
+        .confirmationDialog("Reset the entire index?", isPresented: $confirmingIndexReset) {
+            Button("Reset All Indexes", role: .destructive) {
+                state.app.engine.resetIndex()
+            }
+        } message: {
+            Text("Morrow will remove indexed file data from the main and code indexes, then rebuild them from your selected folders. People names and reference photos are kept.")
+        }
     }
 }
 
@@ -684,7 +793,9 @@ private struct CodeSettings: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(state.codeSummaries) { summary in
-                    FolderStatusRow(summary: summary) { removing = summary }
+                    FolderStatusRow(summary: summary,
+                                    reset: { state.app.engine.resetIndex(under: URL(fileURLWithPath: summary.path)) },
+                                    remove: { removing = summary })
                 }
             } header: {
                 Text("Code folders")
@@ -764,8 +875,6 @@ private struct CodeSettings: View {
             }
         }
         .formStyle(.grouped)
-        .scrollDisabled(true)
-        .onChange(of: state.model.status) { state.statusChanged() }
         .confirmationDialog("Turn off code search?", isPresented: $turningOff) {
             Button("Turn Off", role: .destructive) {
                 state.app.applyCodeFolders([], excluded: [])

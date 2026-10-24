@@ -15,6 +15,7 @@ final class AppController {
     let download: ModelDownload
     let hotkeys = HotkeyCenter()
     let updates: Updates
+    private(set) var launchLogo = LogoLaunchState(foregroundLaunch: false)
     private let power: PowerPolicy
     private let schedule: IndexSchedule
     private(set) var panel: SearchPanelController!
@@ -59,16 +60,16 @@ final class AppController {
 
     /// `showWindow`: opened by hand (not at login), so the search window comes up once the app is set up.
     func start(showWindow: Bool = false) {
+        launchLogo = LogoLaunchState(foregroundLaunch: showWindow && !Self.offscreen)
         panel = SearchPanelController(app: self)
         searchWindow = SearchWindowController(app: self)
         settingsWindow = SettingsWindowController(app: self)
-        statusMenu = StatusMenuController(model: model)
+        statusMenu = StatusMenuController(model: model, people: people)
         statusMenu.onSearch = { [weak self] in self?.panel.show() }
         statusMenu.onOpenWindow = { [weak self] in self?.showSearchWindow() }
         statusMenu.onSettings = { [weak self] in self?.showSettings() }
         statusMenu.onChooseFolders = { [weak self] in self?.chooseFolders() }
         statusMenu.onPauseChanged = { [weak self] paused in self?.engine.setPaused(paused) }
-        statusMenu.onCheckForUpdates = { [weak self] in self?.updates.checkNow() }
         updates.onSessionEnded = { [weak self] in self?.windowClosed() }
         updates.start()
 
@@ -80,17 +81,38 @@ final class AppController {
             model.hotkey = hotkeys.register(combo) ? combo : nil
             log(model.hotkey == nil ? "hotkey \(combo.display) is taken by another app" : "hotkey \(combo.display)")
         } else {
-            log("hotkey: can't read \"\(model.settings.hotkey)\" (try cmd+shift+space)")
+            log("hotkey: can't read \"\(model.settings.hotkey)\" (try ctrl+shift+space)")
         }
 
         Previews.shared.passage = { [engine] id, code in await engine.text(ofSegment: id, code: code) }
         CodeEditor.current = CodeEditor.chosen(model.settings.codeEditor)
         download.onReady = { [weak self] in self?.engine.modelArrived() }
         engine.start()
-        people.mayIndex = { [weak model] in
-            guard let model else { return false }
-            return !model.status.paused && model.status.heldUntil == nil && model.status.waitingFor == nil
+        people.backgroundIndexingWaitReason = { [weak model] in
+            guard let model else { return "Morrow is unavailable" }
+            let status = model.status
+            if status.paused { return "Waiting for file search to resume" }
+            if status.heldUntil != nil { return "Waiting for the scheduled file-indexing window" }
+            if let reason = status.waitingFor { return "Waiting for \(reason)" }
+            let chosenRoots = model.settings.roots.count
+            if chosenRoots > 0, status.missingRoots.count >= chosenRoots {
+                return "Waiting for a selected drive to reconnect"
+            }
+            if chosenRoots > 0, status.unreadableRoots.count >= chosenRoots {
+                return "Allow Morrow to read selected folders in Privacy & Security"
+            }
+            switch status.activity {
+            case .starting: return "Waiting for file search to start"
+            case .syncing: return "Waiting for the folder check to finish"
+            case .indexing: return "Waiting for file search to finish indexing"
+            case .finishing: return "Waiting for file search to finish reading files"
+            case .failed, .idle:
+                return status.code.indexing == nil ? nil : "Waiting for code indexing to finish"
+            }
         }
+        let people = self.people
+        model.onStatusChange = { [weak people] in people?.indexingStatusChanged() }
+        people.indexingStatusChanged()
         people.start()
         let settings = model.settings
         if !settings.onboarded, settings.roots.isEmpty {
@@ -118,6 +140,7 @@ final class AppController {
         guard affected else { return }
         log("volume: \(volume) came or went")
         engine.volumesChanged()
+        people.foldersChanged()
     }
 
     // MARK: Folders
@@ -155,6 +178,7 @@ final class AppController {
         AppSettings.save(excludedFolders: folders)
         model.settings.excludedFolders = folders
         engine.setFolders(roots: model.settings.roots, excluded: folders, excludedTypes: model.settings.excludedTypes)
+        people.foldersChanged()
     }
 
     /// File extensions never to index ("heic, .txt"); files of those types already indexed leave the index.
@@ -164,6 +188,7 @@ final class AppController {
         AppSettings.save(excludedTypes: types)
         model.settings.excludedTypes = types
         engine.setFolders(roots: model.settings.roots, excluded: model.settings.excludedFolders, excludedTypes: types)
+        people.foldersChanged()
     }
 
     // MARK: Code search
@@ -217,9 +242,24 @@ final class AppController {
         panel.allowsMultipleSelection = true
         panel.canCreateDirectories = false
         panel.prompt = prompt
-        panel.message = "Choose folders for DigUp to search."
+        panel.message = "Choose folders for Morrow to search."
         let finish = { (response: NSApplication.ModalResponse) in
             done(response == .OK ? panel.urls.map { AppSettings.folderURL($0.path) } : [])
+        }
+        if let window { panel.beginSheetModal(for: window, completionHandler: finish) } else { finish(panel.runModal()) }
+    }
+
+    /// Chooses one folder for a scoped index reset; the caller checks it is inside a searched folder.
+    func pickFolderToReset(for window: NSWindow?, then done: @escaping (URL?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "Choose Folder"
+        panel.message = "Choose a folder inside one of Morrow’s indexed folders. Its indexed data will be rebuilt."
+        let finish = { (response: NSApplication.ModalResponse) in
+            done(response == .OK ? panel.url.map { AppSettings.folderURL($0.path) } : nil)
         }
         if let window { panel.beginSheetModal(for: window, completionHandler: finish) } else { finish(panel.runModal()) }
     }
@@ -281,7 +321,7 @@ final class AppController {
         searchWindow.show(query: query, kind: kind)
     }
 
-    func showSettings(_ tab: SettingsTab = .general) {
+    func showSettings(_ tab: SettingsTab? = nil) {
         settingsWindow.show(tab)
     }
 
@@ -304,6 +344,12 @@ final class AppController {
 
     /// Brings a window forward, with the Dock icon showing while any window is open. Offscreen test runs only build it.
     func present(_ window: NSWindow) {
+        let defaults = UserDefaults.standard
+        if defaults.string(forKey: "defaultsSuite") != nil,
+           defaults.object(forKey: "debugWidth") != nil, defaults.object(forKey: "debugHeight") != nil {
+            window.setContentSize(NSSize(width: max(window.minSize.width, defaults.double(forKey: "debugWidth")),
+                                         height: max(window.minSize.height, defaults.double(forKey: "debugHeight"))))
+        }
         guard !Self.offscreen else { return }
         NSApp.setActivationPolicy(.regular)
         bringAppToFront()

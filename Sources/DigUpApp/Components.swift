@@ -2,21 +2,67 @@ import AppKit
 import DigUpKit
 import SwiftUI
 
-/// The app's own colors, from its icon (moss tiles around an amber D, `Resources/AppIcon`): amber marks what DigUp
-/// finds (accent icons), moss is for brand moments (onboarding's glow and tiles); selection and controls follow the
-/// system accent color like any Mac app.
+/// Coral carries emphasis; peach adds warmth without tinting the content canvas.
 enum Brand {
-    static let amber = Color(red: 0.949, green: 0.635, blue: 0.165)    // #F2A22A, the D
-    static let ember = Color(red: 0.851, green: 0.482, blue: 0.102)    // #D97B1A, a deeper amber that holds up on white
-    static let moss = Color(red: 0.208, green: 0.400, blue: 0.322)     // #356652, the darkest tile
-    static let leaf = Color(red: 0.310, green: 0.502, blue: 0.345)     // #4F8058
-    static let sprout = Color(red: 0.635, green: 0.780, blue: 0.557)   // #A2C78E, a light tile
-    /// Accent icons: the D's amber.
-    static let gradient = LinearGradient(colors: [amber, ember], startPoint: .top, endPoint: .bottom)
-    /// Tiles with a white symbol on them, like the icon's.
-    static let tile = LinearGradient(colors: [leaf, moss], startPoint: .top, endPoint: .bottom)
-    /// The soft glow behind onboarding's steps.
-    static let wash = LinearGradient(colors: [sprout, leaf], startPoint: .topLeading, endPoint: .bottomTrailing)
+    static let accent = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 1, green: 0.53, blue: 0.44, alpha: 1)
+            : NSColor(srgbRed: 0.76, green: 0.23, blue: 0.20, alpha: 1)
+    })
+    static let coral = Color(red: 0.96, green: 0.40, blue: 0.34)
+    static let peach = Color(red: 1, green: 0.74, blue: 0.56)
+    static let rose = Color(red: 0.76, green: 0.25, blue: 0.32)
+    static let gradient = LinearGradient(colors: [peach, coral], startPoint: .topLeading, endPoint: .bottomTrailing)
+    static let tile = LinearGradient(colors: [coral, rose], startPoint: .topLeading, endPoint: .bottomTrailing)
+    static let wash = LinearGradient(colors: [peach.opacity(0.3), coral.opacity(0.12), .clear],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing)
+}
+
+/// Use motion to explain occasional changes. Typing, selection and keyboard navigation stay immediate.
+enum MorrowMotion {
+    static let reveal = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.22)
+    static let press = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.12)
+    static let reducedReveal = Animation.easeOut(duration: 0.12)
+
+    /// Capture at the state mutation, while AppKit still owns the initiating event.
+    static var keyboardInitiated: Bool {
+        guard let type = NSApp?.currentEvent?.type else { return false }
+        return type == .keyDown || type == .keyUp || type == .flagsChanged
+    }
+}
+
+/// Only the page changes identity: the sidebar and activity footer remain anchored.
+/// SwiftUI transitions retarget when another destination is selected mid-flight.
+struct MorrowPageDeck<Selection: Hashable, Content: View>: View {
+    let selection: Selection
+    var animated = true
+    @ViewBuilder var content: () -> Content
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            content()
+                .id(selection)
+                .transition(.opacity.combined(with: .offset(y: reduceMotion ? 0 : 10)))
+                .zIndex(1)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .clipped()
+        .animation(animated ? (reduceMotion ? MorrowMotion.reducedReveal : MorrowMotion.reveal) : nil,
+                   value: selection)
+    }
+}
+
+struct QuietPressStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func makeBody(configuration: Configuration) -> some View {
+        let mousePress = configuration.isPressed && [.leftMouseDown, .leftMouseDragged].contains(NSApp?.currentEvent?.type ?? .applicationDefined)
+        return configuration.label
+            .contentShape(Rectangle())
+            .opacity(mousePress ? 0.82 : 1)
+            .scaleEffect(mousePress && !reduceMotion ? 0.98 : 1)
+            .animation(mousePress && !reduceMotion ? MorrowMotion.press : .easeOut(duration: 0.08), value: mousePress)
+    }
 }
 
 /// ⇧ ⌘ Space as keycaps.

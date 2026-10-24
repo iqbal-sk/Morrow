@@ -314,7 +314,7 @@ private struct FolderRow: View {
         } : choices.searchedPart(of: row)
         return HStack(spacing: 10) {
             Button {
-                withAnimation(.easeOut(duration: 0.15)) { choices.toggleExpanded(row) }
+                choices.toggleExpanded(row)
             } label: {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 10, weight: .semibold))
@@ -341,7 +341,7 @@ private struct FolderRow: View {
                         .foregroundStyle(.secondary)
                 } else if let estimate, !estimate.readable {
                     HStack(spacing: 6) {
-                        Text("macOS isn't letting DigUp read it.")
+                        Text("macOS isn't letting Morrow read it.")
                             .font(.system(size: 11))
                             .foregroundStyle(.orange)
                         Button("Allow in Settings…", action: openFolderPrivacySettings)

@@ -49,7 +49,7 @@ let usage = """
       --code-stretch N     characters a stretch of code holds at most (default 1800; 1200 and 3600 lost on the evals)
 
     The model: EmbeddingGemma 2 on llama.cpp, from $DIGUP_MODELS (only there, when set), else
-    ~/Library/Application Support/DigUp/Models or the Hugging Face cache. DIGUP_WORKER_DIR=worker uses the
+    ~/Library/Application Support/Morrow/Models or the Hugging Face cache. DIGUP_WORKER_DIR=worker uses the
     mlx-vlm reference worker instead (evals).
     """
 

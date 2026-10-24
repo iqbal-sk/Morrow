@@ -1,4 +1,4 @@
-//! DigUp's helper processes, which do all the work: `digup search-service` answers the panel (a JSON request per line
+//! Morrow's helper processes, which do all the work: `digup search-service` answers the panel (a JSON request per line
 //! in, the reply on a line out with the request's id; lines without an id are events), and `digup index-service` keeps
 //! the index current (commands in, events out) and exits when it's done. Sources/digup has both protocols. Each one's
 //! output is read on a thread of its own, which waits for the process when its output ends, so none is left a zombie.
@@ -67,7 +67,7 @@ impl Launch {
 }
 
 /// A process started apart from the helpers here (the speed check, folder estimates): on Windows it joins their job, so it
-/// ends with DigUp, and with them before an update's installer runs.
+/// ends with Morrow, and with them before an update's installer runs.
 pub fn adopt(child: &Child) {
     #[cfg(windows)]
     job::add(child);
@@ -142,7 +142,7 @@ impl SearchService {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         request["id"] = json!(id);
         let reply = self.send(id, &request)?;
-        let reply = reply.await.map_err(|_| "DigUp's helper stopped".to_string())?;
+        let reply = reply.await.map_err(|_| "Morrow's helper stopped".to_string())?;
         match reply.get("ok") {
             Some(Value::Bool(false)) => Err(reply["error"].as_str().unwrap_or("the helper failed").to_string()),
             _ => Ok(reply),
@@ -165,7 +165,7 @@ impl SearchService {
         if let Err(error) = writeln!(searching.stdin, "{request}").and_then(|_| searching.stdin.flush()) {
             searching.pending.lock().unwrap().remove(&id);
             *running = None;
-            return Err(format!("DigUp's helper isn't answering: {error}"));
+            return Err(format!("Morrow's helper isn't answering: {error}"));
         }
         Ok(receiver)
     }

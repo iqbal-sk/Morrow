@@ -328,6 +328,25 @@ public final class IndexStore {
         }
     }
 
+    /// Deletes indexed file records and their derived search data, for one folder subtree or the whole index.
+    /// People profiles and reference photos live separately and are left intact; file-derived faces cascade away.
+    @discardableResult
+    public func deleteIndexedFiles(under folder: String? = nil) throws -> Int {
+        let ids: [Int64]
+        if let folder {
+            ids = try files(under: [folder]).map(\.id)
+        } else {
+            var all: [Int64] = []
+            try db.query("SELECT id FROM files") { all.append($0.int(0)) }
+            ids = all
+        }
+        guard !ids.isEmpty else { return 0 }
+        try db.transaction {
+            for id in ids { try delete(id) }
+        }
+        return ids.count
+    }
+
     /// Files waiting to be embedded, in indexing order; `only` narrows it to some files (just-added ones).
     public func pending(limit: Int?, only ids: Set<Int64>? = nil) throws -> [FileRecord] {
         var out: [FileRecord] = []

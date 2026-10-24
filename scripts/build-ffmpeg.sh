@@ -1,5 +1,5 @@
 #!/bin/bash
-# Linux and Windows: ffmpeg and ffprobe for DigUp's packages, built small: LGPL, static, decoding only what people keep
+# Linux and Windows: ffmpeg and ffprobe for Morrow's packages, built small: LGPL, static, decoding only what people keep
 # (common audio and video, and HEIC, WebP, TIFF and AVIF pictures), writing only what the engine asks for (16 kHz PCM,
 # JPEG frames, PPM pictures). AV1 and AVIF decode with dav1d, built here too, and zlib is linked in: those three are
 # all the licenses it carries (their texts land in Vendor/ffmpeg/licenses for the packages' notices). → Vendor/ffmpeg/bin
@@ -43,7 +43,7 @@ decoders=(h264 hevc mpeg4 msmpeg4v1 msmpeg4v2 msmpeg4v3 mpeg1video mpeg2video mj
   tta gsm gsm_ms adpcm_ima_qt adpcm_ima_wav adpcm_ms pcm_s16le pcm_s16be pcm_s24le pcm_s24be pcm_s32le pcm_s32be
   pcm_f32le pcm_f32be pcm_f64le pcm_u8 pcm_alaw pcm_mulaw pcm_s16le_planar pcm_dvd pcm_bluray)
 parsers=(h264 hevc mpeg4video mpegvideo vp8 vp9 av1 aac aac_latm mpegaudio flac opus vorbis ac3 mjpeg png webp bmp)
-# What the ffmpeg command puts in by itself (format and size changes, rotation, HEIC's tile grids), and what DigUp asks.
+# What the ffmpeg command puts in by itself (format and size changes, rotation, HEIC's tile grids), and what Morrow asks.
 filters=(buffer buffersink abuffer abuffersink null anull format aformat aresample scale fps crop pad overlay xstack
   hstack vstack transpose hflip vflip rotate setsar setdar copy trim atrim)
 

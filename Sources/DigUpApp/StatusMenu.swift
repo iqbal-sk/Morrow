@@ -1,9 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// The menubar icon: DigUp's logo (`Resources/AppIcon/tray.svg` and its `tray*.png`, as the Windows and Linux app's tray
-/// shows it). While the model downloads or files index, the tiles are dimmed and get their color back in a sweep from
-/// the top, clockwise, as far as it has come; while indexing is paused, two bars take the D's place.
+/// The menubar uses the Reveal artwork exported to `Resources/AppIcon/tray*.png`.
+/// During indexing, color returns in a clockwise progress sweep; the paused variant adds two bars.
 enum StatusIcon {
     private static let logo = picture("tray"), dimmed = picture("tray-dim"), pausedLogo = picture("tray-paused")
 
@@ -41,7 +40,7 @@ enum StatusIcon {
             }
             return true
         }
-        image.accessibilityDescription = "DigUp"
+        image.accessibilityDescription = "Morrow"
         return image
     }
 }
@@ -49,6 +48,7 @@ enum StatusIcon {
 /// The menubar icon and its menu: what's going on (with a progress bar), Search…, the window, Pause, Settings, Quit.
 final class StatusMenuController: NSObject, NSMenuDelegate {
     private let model: AppModel
+    private let people: PeopleCoordinator
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     var onSearch: () -> Void = {}
@@ -56,25 +56,24 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     var onSettings: () -> Void = {}
     var onChooseFolders: () -> Void = {}
     var onPauseChanged: (Bool) -> Void = { _ in }
-    var onCheckForUpdates: () -> Void = {}
     private var shownProgress: Double?
     private var shownPaused = false
-    private var shownUpdate = false
 
-    init(model: AppModel) {
+    init(model: AppModel, people: PeopleCoordinator) {
         self.model = model
+        self.people = people
         super.init()
         menu.delegate = self
         statusItem.menu = menu
         refreshButton()
         observeModel()
+        observePeople()
     }
 
     private func observeModel() {
         withObservationTracking {
             _ = model.status
             _ = model.progress
-            _ = model.updateAvailable
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.refreshButton()
@@ -83,32 +82,38 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         }
     }
 
+    private func observePeople() {
+        withObservationTracking {
+            _ = people.scanStatusLine
+            _ = people.scanProgressFraction
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                self?.refreshButton()
+                self?.observePeople()
+            }
+        }
+    }
+
     private func refreshButton() {
         guard let button = statusItem.button else { return }
-        let progress = model.progress.map { ($0 * 50).rounded() / 50 }   // redraw in 2% steps, not every file
-        let paused = model.status.paused, update = model.updateAvailable != nil
-        if progress != shownProgress || paused != shownPaused || update != shownUpdate || button.image == nil {
-            button.image = StatusIcon.image(progress: progress, paused: paused, update: update)
+        let progress = (model.progress ?? model.codeProgress ?? people.scanProgressFraction).map { ($0 * 50).rounded() / 50 }
+        let paused = model.status.paused
+        if progress != shownProgress || paused != shownPaused || button.image == nil {
+            button.image = StatusIcon.image(progress: progress, paused: paused)
             shownProgress = progress
             shownPaused = paused
-            shownUpdate = update
         }
-        button.toolTip = "DigUp — \(model.statusLine)"
+        button.toolTip = "Morrow — \(model.statusLine) · \(people.scanStatusLine)"
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let header = NSMenuItem()
-        let view = NSHostingView(rootView: MenuStatusView(model: model))
+        let view = NSHostingView(rootView: MenuStatusView(model: model, people: people).morrowTheme())
         view.frame.size = view.fittingSize
         header.view = view
         menu.addItem(header)
         menu.addItem(.separator())
-        if let version = model.updateAvailable {
-            menu.addItem(ActionMenuItem("Update to DigUp \(version)…") { [weak self] in self?.onCheckForUpdates() })
-            menu.addItem(.separator())
-        }
-
         if !model.hasFolders {
             menu.addItem(ActionMenuItem("Choose Folders to Search…") { [weak self] in self?.onChooseFolders() })
         }
@@ -118,8 +123,8 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
             search.keyEquivalentModifierMask = modifiers
         }
         menu.addItem(search)
-        menu.addItem(ActionMenuItem("Open DigUp") { [weak self] in self?.onOpenWindow() })
-        if model.hasFolders {
+        menu.addItem(ActionMenuItem("Open Morrow") { [weak self] in self?.onOpenWindow() })
+        if model.hasFolders || model.hasCode {
             menu.addItem(.separator())
             let paused = model.status.paused
             menu.addItem(ActionMenuItem(paused ? "Resume Indexing" : "Pause Indexing") { [weak self] in
@@ -134,10 +139,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(ActionMenuItem("Settings…", key: ",") { [weak self] in self?.onSettings() })
-        if model.updateAvailable == nil {
-            menu.addItem(ActionMenuItem("Check for Updates…") { [weak self] in self?.onCheckForUpdates() })
-        }
-        menu.addItem(ActionMenuItem("Quit DigUp", key: "q") { NSApp.terminate(nil) })
+        menu.addItem(ActionMenuItem("Quit Morrow", key: "q") { NSApp.terminate(nil) })
     }
 
     /// The menu as text, for the -debugMenu launch argument (menus can't be clicked from a script).
@@ -146,7 +148,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menuNeedsUpdate(menu)
         return menu.items.map { item in
             if item.isSeparatorItem { return "—" }
-            if item.view != nil { return "[\(model.statusLine)]" }
+            if item.view != nil { return "[File search: \(model.statusLine) · People search: \(people.scanStatusLine)]" }
             return item.title + (item.isEnabled ? "" : " (disabled)")
         }.joined(separator: " | ")
     }
@@ -160,29 +162,61 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 }
 
-/// The top of the menu: the status line, a detail (where, or how long), and progress while there is some.
-struct MenuStatusView: View {
-    let model: AppModel
+/// A compact, consistently worded tracker for one of Morrow's two background jobs.
+struct IndexingTrackerRow: View {
+    let title: String
+    let detail: String
+    let symbol: String
+    let progress: Double?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(model.statusLine)
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(1)
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: symbol)
+                    .foregroundStyle(Brand.accent)
+                    .frame(width: 16)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    Text(detail).font(.system(size: 12, weight: .medium)).lineLimit(2)
+                }
+                Spacer(minLength: 0)
+            }
+            if let progress {
+                ProgressView(value: progress)
+                    .controlSize(.small)
+                    .accessibilityLabel("\(title) progress")
+            }
+        }
+    }
+}
+
+/// The top of the menu shows file search and face scanning as separate jobs.
+struct MenuStatusView: View {
+    let model: AppModel
+    let people: PeopleCoordinator
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            IndexingTrackerRow(title: "File search", detail: model.statusLine,
+                               symbol: "doc.text.magnifyingglass", progress: model.progress)
+            if model.hasCode {
+                Divider()
+                IndexingTrackerRow(title: "Code search", detail: model.codeStatusLine,
+                                   symbol: "chevron.left.forwardslash.chevron.right", progress: model.codeProgress)
+            }
+            Divider()
+            IndexingTrackerRow(title: "People search", detail: people.scanStatusLine,
+                               symbol: "person.crop.rectangle.stack", progress: people.scanProgressFraction)
             if let detail {
                 Text(detail)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
-            if let progress = model.progress {
-                ProgressView(value: progress)
-                    .controlSize(.small)
-                    .padding(.top, 2)
-            }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 5)
+        .padding(.vertical, 7)
         .frame(width: 280, alignment: .leading)
     }
 

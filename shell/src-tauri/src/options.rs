@@ -7,10 +7,10 @@ use std::path::PathBuf;
 pub const DEFAULT_HOTKEY: &str = "CommandOrControl+Shift+Space";
 
 pub struct Options {
-    /// DigUp's helper, `digup` (default: beside this program, where the installers put it).
+    /// Morrow's helper, `digup` (default: beside this program, where the installers put it).
     pub helper: PathBuf,
-    /// The index folder. None: the helper's own default (%LOCALAPPDATA%\DigUp\index on Windows,
-    /// ~/.local/share/digup/index on Linux).
+    /// The index folder. None: the helper's own default (%LOCALAPPDATA%\Morrow\index on Windows,
+    /// ~/.local/share/morrow/index on Linux).
     pub index: Option<PathBuf>,
     /// Where the model files are (DIGUP_MODELS for the helpers); None: the helper looks where it always does.
     pub models: Option<PathBuf>,
@@ -43,10 +43,10 @@ pub struct Options {
     pub debug_settings: bool,
     /// Debug runs with `debug_window`: after its report the window copies its selected result, as Ctrl+C does.
     pub debug_copy: bool,
-    /// A desktop shortcut's command (hotkey.rs): show or hide the panel of the DigUp already running, or start DigUp
+    /// A desktop shortcut's command (hotkey.rs): show or hide the panel of Morrow already running, or start Morrow
     /// with the panel up.
     pub toggle: bool,
-    /// Started at login (the autostart entry says so): DigUp waits in the tray. Opened by hand, it shows its window.
+    /// Started at login (the autostart entry says so): Morrow waits in the tray. Opened by hand, it shows its window.
     pub at_login: bool,
     /// Debug runs: check for updates at once (in a dev run too), once.
     pub debug_update_check: bool,
@@ -108,7 +108,7 @@ impl Options {
         }
         // On a Mac the shell is only tried out: the helper's default index there is the Mac app's.
         if cfg!(target_os = "macos") && options.index.is_none() {
-            return Err("pass --index: on a Mac the default index belongs to the DigUp app".into());
+            return Err("pass --index: on a Mac the default index belongs to the Morrow app".into());
         }
         Ok(options)
     }
@@ -121,22 +121,22 @@ impl Options {
             return self.index.clone();
         }
         if cfg!(windows) {
-            return std::env::var_os("LOCALAPPDATA").map(|local| PathBuf::from(local).join("DigUp").join("index"));
+            return std::env::var_os("LOCALAPPDATA").map(|local| PathBuf::from(local).join("Morrow").join("index"));
         }
         let data = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
-        data.map(|data| data.join("digup").join("index"))
+        data.map(|data| data.join("morrow").join("index"))
     }
 }
 
-/// The helper in the `helper` folder beside this program (Windows: "DigUp.exe" and "digup.exe" can't share a folder),
-/// or where the Linux packages put it (lib/DigUp/helper beside their bin folder), else beside this program.
+/// The helper in the `helper` folder beside this program (Windows: "Morrow.exe" and "digup.exe" can't share a folder),
+/// or where the Linux packages put it (lib/Morrow/helper beside their bin folder), else beside this program.
 fn default_helper() -> PathBuf {
     let name = if cfg!(windows) { "digup.exe" } else { "digup" };
     let Some(folder) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(PathBuf::from)) else {
         return PathBuf::from(name);
     };
-    [folder.join("helper").join(name), folder.join("../lib/DigUp/helper").join(name)]
+    [folder.join("helper").join(name), folder.join("../lib/Morrow/helper").join(name)]
         .into_iter()
         .find(|helper| helper.is_file())
         .unwrap_or_else(|| folder.join(name))

@@ -141,9 +141,7 @@ final class SearchPanelController {
     }
 
     func hide() {
-        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
-            QLPreviewPanel.shared().orderOut(nil)
-        }
+        if ownsVisibleQuickLook { QLPreviewPanel.shared().orderOut(nil) }
         removeKeyMonitor()
         PreviewPlayback.shared.stop()
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
@@ -318,7 +316,7 @@ final class SearchPanelController {
         if (field?.currentEditor() as? NSTextView)?.hasMarkedText() == true { return false }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .numericPad, .function])
-        let previewing = QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible
+        let previewing = ownsVisibleQuickLook
         switch event.keyCode {
         case 53:  // Esc
             if previewing { QLPreviewPanel.shared().orderOut(nil) } else { dismiss() }
@@ -444,9 +442,14 @@ final class SearchPanelController {
 
     // MARK: Quick Look
 
+    private var ownsVisibleQuickLook: Bool {
+        QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible
+            && QLPreviewPanel.shared().dataSource === window
+    }
+
     func toggleQuickLook() {
         let panel = QLPreviewPanel.shared()!
-        if QLPreviewPanel.sharedPreviewPanelExists(), panel.isVisible {
+        if ownsVisibleQuickLook {
             panel.orderOut(nil)
         } else if selectedRow != nil {
             updateQuickLook()
@@ -467,7 +470,7 @@ final class SearchPanelController {
         let window = SearchPanelWindow()
         let hosting = NSHostingView(rootView: SearchPanelView(controller: self))
         hosting.sizingOptions = []
-        window.contentView = Self.background(containing: hosting)
+        window.contentView = NativeGlassPanel.hosting(hosting)
         self.window = window
         return window
     }
@@ -498,34 +501,6 @@ final class SearchPanelController {
             frame.size.height = height
             window.setFrame(frame, display: true)
         }
-    }
-
-    /// Glass (or vibrancy before macOS 26) behind the SwiftUI content. The content sits beside the glass rather than
-    /// inside it, since NSGlassEffectView resizes its contentView itself.
-    private static func background(containing content: NSView) -> NSView {
-        let radius: CGFloat = 18
-        let backdrop: NSView
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.cornerRadius = radius
-            backdrop = glass
-        } else {
-            let effect = NSVisualEffectView()
-            effect.material = .popover
-            effect.state = .active
-            effect.blendingMode = .behindWindow
-            effect.wantsLayer = true
-            effect.layer?.cornerRadius = radius
-            effect.layer?.masksToBounds = true
-            backdrop = effect
-        }
-        let container = NSView()
-        for view in [backdrop, content] {
-            view.frame = container.bounds
-            view.autoresizingMask = [.width, .height]
-            container.addSubview(view)
-        }
-        return container
     }
 
     /// Draws the panel into a PNG (see `Snapshot`); the glass doesn't draw that way, so it's on the window color.

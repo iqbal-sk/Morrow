@@ -9,7 +9,7 @@ body:
     id: what
     attributes:
       label: What happens
-      description: What you did (or searched for), what DigUp did, and what you expected instead.
+      description: What you did (or searched for), what Morrow did, and what you expected instead.
     validations:
       required: true
   - type: dropdown
@@ -22,8 +22,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: DigUp version and system version
-      placeholder: "DigUp 0.6.1, macOS 26.1 · or DigUp 0.7.0-beta.1, Windows 11 · or Ubuntu 24.04, GNOME, Wayland"
+      label: Morrow version and system version
+      placeholder: "Morrow 0.1.0, macOS 26.1 · Windows 11 · or Ubuntu 24.04, GNOME, Wayland"
     validations:
       required: true
   - type: input
@@ -36,8 +36,8 @@ body:
     attributes:
       label: Logs
       description: |
-        Mac: `~/Library/Application Support/DigUp/index.noindex` (`app.log`, `indexer.log`).
-        Windows: `%LOCALAPPDATA%\com.abdurrahim.DigUp\logs`, and `worker.log` in `%LOCALAPPDATA%\DigUp\index`.
-        Linux: `~/.local/share/com.abdurrahim.DigUp/logs`, and `worker.log` in `~/.local/share/digup/index`.
+        Mac: `~/Library/Application Support/Morrow/index.noindex` (`app.log`, `indexer.log`).
+        Windows: `%LOCALAPPDATA%\com.iqbal.morrow\logs`, and `worker.log` in `%LOCALAPPDATA%\Morrow\index`.
+        Linux: `~/.local/share/com.iqbal.morrow/logs`, and `worker.log` in `~/.local/share/morrow/index`.
         They can contain file names and your searches, so look through them before you paste.
       render: text

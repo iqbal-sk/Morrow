@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>DigUp</title>
+  <title>Morrow</title>
   <link rel="stylesheet" href="window.css">
 </head>
 <body>
@@ -15,7 +15,7 @@
           <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="8"/><path d="M7 7 L13 13 M13 7 L7 13"/></svg>
         </button>
       </label>
-      <button class="tool" id="toggle-preview" aria-pressed="true">
+      <button class="tool" id="toggle-preview" title="Hide preview pane" aria-label="Hide preview pane" aria-pressed="true">
         <svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M14.5 5 V19"/></svg>
       </button>
       <button class="tool" id="settings" aria-label="Settings">
@@ -38,8 +38,7 @@
     <button class="status-line" id="status-line" title="Folders and indexing"></button>
     <span class="spacer"></span>
     <span class="count" id="count"></span>
-    <button class="update" id="update" title="See what's new and update" hidden></button>
-  </footer>
+      </footer>
 
   <div class="menu" id="menu" role="menu" hidden></div>
   <script src="results.js"></script>

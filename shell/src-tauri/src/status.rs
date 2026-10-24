@@ -1,4 +1,4 @@
-//! What DigUp is doing, in the words the tray, the window and the panel use: the index helper's events and the model's
+//! What Morrow is doing, in the words the tray, the window and the panel use: the index helper's events and the model's
 //! download turned into one line, a progress and a caveat for results (the Mac app's AppModel and EngineStatus).
 
 use serde_json::{json, Value};
@@ -29,7 +29,7 @@ pub struct Status {
     pub pending: u64,
     /// Long files with pages or chunks still to read.
     pub unfinished: u64,
-    /// Chosen folders that aren't there now (an unplugged drive), and ones DigUp can't read: skipped, files kept.
+    /// Chosen folders that aren't there now (an unplugged drive), and ones Morrow can't read: skipped, files kept.
     pub missing: Vec<String>,
     /// What the last sync left out under each chosen folder, by reason (the helper's `left_out`), for Settings.
     pub left_out: Value,

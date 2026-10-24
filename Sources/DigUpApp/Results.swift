@@ -22,6 +22,7 @@ struct ResultRow: Identifiable, Equatable {
     let info: [String: String]
     /// The query's words (`Searcher.terms`): what the preview highlights on a page or in a passage.
     let terms: [String]
+    var isBrowsing = false
 
     init(_ hit: SearchHit, terms: [String] = []) {
         id = hit.path
@@ -90,12 +91,15 @@ struct ResultRow: Identifiable, Equatable {
     }
 
     /// What the preview shows: the moment or the page that matched, else the file.
-    var previewKey: String { "\(id)|\(loc.map { "\($0)" } ?? "")" }
+    var previewKey: String {
+        "\(id)|\(modified.timeIntervalSince1970)|\(size)|\(segmentID)|\(loc.map { "\($0)" } ?? "")"
+    }
 
     var duration: Double? { info["duration"].flatMap(Double.init) }
 
     /// Why it's here, in a few words: "Matches the picture", "Matches the frame at 0:06".
     var reason: String {
+        if isBrowsing { return "In your library" }
         guard matchedMeaning else { return matchedWords ? "Has your words" : "Matches its name" }
         let place = loc.map(Self.clock) ?? ""
         let page = loc.map { "page \(Int($0))" } ?? "a page"

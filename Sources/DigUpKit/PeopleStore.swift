@@ -70,10 +70,71 @@ public struct PersonQuery: Sendable {
     public let ambiguous: [String]
 }
 
+/// The subset of Morrow's indexed photos eligible for face work. Keeping this rule shared makes it testable and keeps
+/// background face indexing aligned with the folder and file-type controls in Settings.
+public struct FacePhotoSelection: Codable, Sendable {
+    public let roots: [String]
+    public let excluded: [String]
+    public let types: [String]
+
+    public init(roots: [String], excluded: [String], types: [String]) {
+        self.roots = roots
+        self.excluded = excluded
+        self.types = types.map { $0.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
+            .filter { !$0.isEmpty }
+    }
+
+    public func includes(_ path: String) -> Bool {
+        FolderSelection.isSearched(path, folders: roots, skipped: excluded)
+            && !types.contains((path as NSString).pathExtension.lowercased())
+    }
+
+    public func eligiblePending(_ jobs: [(Int64, String, String)]) -> [(Int64, String, String)] {
+        jobs.filter { _, path, _ in includes(path) }
+    }
+
+    public func filterPending(_ jobs: [(Int64, String, String)], isReadable: (String) -> Bool) -> [(Int64, String, String)] {
+        eligiblePending(jobs).filter { isReadable($0.1) }
+    }
+
+    /// SQL equivalent of `includes`, used so review limits and match counts apply only to selected files.
+    /// `pathExpression` is supplied by PeopleStore from fixed column names, never from user input.
+    func sqlPredicate(pathExpression: String) -> (String, [SQLValue]) {
+        guard !roots.isEmpty else { return ("0", []) }
+        var values: [SQLValue] = []
+        let rootTerms = roots.map { root -> String in
+            let prefix = root.hasSuffix("/") ? root : root + "/"
+            values += [.text(root), .text(prefix), .text(prefix)]
+            let included = "(\(pathExpression)=? OR substr(\(pathExpression),1,length(?))=?)"
+            let skipped = excluded.filter { FolderSelection.isInside($0, root) }
+            guard !skipped.isEmpty else { return included }
+            let excludedTerms = skipped.map { path -> String in
+                let prefix = path.hasSuffix("/") ? path : path + "/"
+                values += [.text(path), .text(prefix), .text(prefix)]
+                return "(\(pathExpression)=? OR substr(\(pathExpression),1,length(?))=?)"
+            }
+            return "(\(included) AND NOT (\(excludedTerms.joined(separator: " OR "))))"
+        }
+        var predicate = "(\(rootTerms.joined(separator: " OR ")))"
+        let suffixes = types.map { ".\($0)" }
+        if !suffixes.isEmpty {
+            let typeTerms = suffixes.map { suffix -> String in
+                values += [.text(suffix), .text(suffix)]
+                return "lower(substr(\(pathExpression),-length(?)))=lower(?)"
+            }
+            predicate += " AND NOT (\(typeTerms.joined(separator: " OR ")))"
+        }
+        return (predicate, values)
+    }
+}
+
 /// Confined to the caller's serial queue, like IndexStore. Curated records survive resetAll().
 public final class PeopleStore {
     let store: IndexStore
     var db: Database { store.db }
+    private static func fileStampSQL(_ alias: String) -> String {
+        "CAST(\(alias).size AS TEXT)||':'||CAST(\(alias).mtime AS TEXT)||':'||CAST(\(alias).inode AS TEXT)||':'||CAST(\(alias).device AS TEXT)"
+    }
     static let schemaSQL = """
         CREATE TABLE IF NOT EXISTS people(id INTEGER PRIMARY KEY, name TEXT NOT NULL, aliases TEXT NOT NULL DEFAULT '[]');
         CREATE TABLE IF NOT EXISTS person_references(id INTEGER PRIMARY KEY, person INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
@@ -105,25 +166,31 @@ public final class PeopleStore {
     }
     private func indexingVersion() throws -> String { FaceIdentity.indexingVersion(minimumFacePixels: try minimumFacePixels()) }
     private func markRematchNeeded() throws {
-        try db.run("INSERT OR REPLACE INTO meta(key,value) VALUES('people.rematchNeeded','1')")
+        try db.run("INSERT OR REPLACE INTO meta(key,value) VALUES('people.rematchNeeded',?)", [.text(UUID().uuidString)])
+    }
+    private func rematchMarker() throws -> String? {
+        var marker: String?
+        try db.query("SELECT value FROM meta WHERE key='people.rematchNeeded'") { marker = $0.text(0) }
+        return marker
     }
     public func rematchIfNeeded() throws {
-        var needed = false
-        try db.query("SELECT value FROM meta WHERE key='people.rematchNeeded'") { needed = $0.text(0) == "1" }
-        if needed { try rematch() }
+        guard let marker = try rematchMarker(), marker != "0" else { return }
+        try rematch(clearingMarker: marker)
     }
 
-    public func profiles() throws -> [PersonProfile] {
+    public func profiles(selection: FacePhotoSelection? = nil) throws -> [PersonProfile] {
         var profiles: [PersonProfile] = []
         let policy = try indexingVersion()
+        let stamp = Self.fileStampSQL("s")
+        let (selectionSQL, selectionValues) = selection?.sqlPredicate(pathExpression: "s.path") ?? ("1", [])
         try db.query("""
             SELECT p.id,p.name,p.aliases,(SELECT COUNT(*) FROM person_references r WHERE r.person=p.id),
             (SELECT COUNT(DISTINCT f.file) FROM faces f JOIN face_matches m ON m.face=f.id
                 JOIN face_files d ON d.file=f.file JOIN files s ON s.id=f.file
                 WHERE m.person=p.id AND m.status IN ('auto','confirmed') AND f.model=? AND d.model=?
-                AND d.stamp=CAST(s.size AS TEXT)||':'||CAST(s.mtime AS TEXT)),
+                AND d.stamp=\(stamp) AND \(selectionSQL)),
             (SELECT jpeg FROM person_references r WHERE r.person=p.id ORDER BY r.id LIMIT 1) FROM people p ORDER BY p.name COLLATE NOCASE
-            """, [.text(FaceIdentity.version), .text(policy)]) { row in
+            """, [.text(FaceIdentity.version), .text(policy)] + selectionValues) { row in
             profiles.append(PersonProfile(id: row.int(0), name: row.text(1) ?? "", aliases: Self.strings(row.text(2)),
                                           references: Int(row.int(3)), files: Int(row.int(4)), portrait: row.blob(5)))
         }
@@ -161,23 +228,57 @@ public final class PeopleStore {
         try db.run("DELETE FROM person_references WHERE id=?", [.int(id)])
         try markRematchNeeded()
     }
-    public func pendingPhotos() throws -> [(Int64, String, String)] {
+    public func pendingPhotos(selection: FacePhotoSelection? = nil) throws -> [(Int64, String, String)] {
         var rows: [(Int64, String, String)] = []
         let policy = try indexingVersion()
+        let stamp = Self.fileStampSQL("f")
+        let (selectionSQL, selectionValues) = selection?.sqlPredicate(pathExpression: "f.path") ?? ("1", [])
         try db.query("""
-            SELECT f.id,f.path,CAST(f.size AS TEXT)||':'||CAST(f.mtime AS TEXT) FROM files f
+            SELECT f.id,f.path,\(stamp) FROM files f
             LEFT JOIN face_files d ON d.file=f.id WHERE f.kind IN ('image','screenshot')
-            AND (d.file IS NULL OR d.stamp != CAST(f.size AS TEXT)||':'||CAST(f.mtime AS TEXT) OR d.model != ?)
+            AND (d.file IS NULL OR d.stamp != \(stamp) OR d.model != ?) AND \(selectionSQL)
             ORDER BY f.mtime DESC
-            """, [.text(policy)]) { rows.append(($0.int(0), $0.text(1) ?? "", $0.text(2) ?? "")) }
+            """, [.text(policy)] + selectionValues) { rows.append(($0.int(0), $0.text(1) ?? "", $0.text(2) ?? "")) }
         return rows
     }
-    public func failedPhotos() throws -> Int {
+
+    /// A bounded-memory status query for Settings: count eligible pending photos and stop as soon as one readable path
+    /// is found. Folder/type filtering happens in SQLite before paths are returned to the app.
+    public func pendingPhotoSummary(selection: FacePhotoSelection,
+                                    isReadable: (String) -> Bool) throws -> (count: Int, hasReadable: Bool) {
+        let policy = try indexingVersion()
+        let stamp = Self.fileStampSQL("f")
+        let (selectionSQL, selectionValues) = selection.sqlPredicate(pathExpression: "f.path")
+        let fromWhere = """
+            FROM files f LEFT JOIN face_files d ON d.file=f.id
+            WHERE f.kind IN ('image','screenshot')
+            AND (d.file IS NULL OR d.stamp != \(stamp) OR d.model != ?) AND \(selectionSQL)
+            """
+        let values = [.text(policy)] + selectionValues
         var count = 0
+        try db.query("SELECT COUNT(*) \(fromWhere)", values) { count = Int($0.int(0)) }
+        guard count > 0 else { return (0, false) }
+
+        struct ReadableFound: Error {}
+        var hasReadable = false
+        do {
+            try db.query("SELECT f.path \(fromWhere) ORDER BY f.mtime DESC", values) { row in
+                if isReadable(row.text(0) ?? "") {
+                    hasReadable = true
+                    throw ReadableFound()
+                }
+            }
+        } catch is ReadableFound { }
+        return (count, hasReadable)
+    }
+    public func failedPhotos(selection: FacePhotoSelection? = nil) throws -> Int {
+        var count = 0
+        let stamp = Self.fileStampSQL("s")
+        let (selectionSQL, selectionValues) = selection?.sqlPredicate(pathExpression: "s.path") ?? ("1", [])
         try db.query("""
             SELECT COUNT(*) FROM face_files d JOIN files s ON s.id=d.file
-            WHERE d.model=? AND d.error IS NOT NULL AND d.stamp=CAST(s.size AS TEXT)||':'||CAST(s.mtime AS TEXT)
-            """, [.text(try indexingVersion())]) { count = Int($0.int(0)) }
+            WHERE d.model=? AND d.error IS NOT NULL AND d.stamp=\(stamp) AND \(selectionSQL)
+            """, [.text(try indexingVersion())] + selectionValues) { count = Int($0.int(0)) }
         return count
     }
     public func retryFailedPhotos() throws {
@@ -189,7 +290,8 @@ public final class PeopleStore {
             guard try self.minimumFacePixels() == minimumFacePixels else { return }
             // A helper may be processing a photo while the crawler updates or deletes it.
             var current: String?
-            try db.query("SELECT CAST(size AS TEXT)||':'||CAST(mtime AS TEXT) FROM files WHERE id=?", [.int(file)]) { current = $0.text(0) }
+            let stampSQL = Self.fileStampSQL("f")
+            try db.query("SELECT \(stampSQL) FROM files f WHERE f.id=?", [.int(file)]) { current = $0.text(0) }
             guard current == stamp else { return }
             var alreadySaved = false
             try db.query("SELECT 1 FROM face_files WHERE file=? AND stamp=? AND model=?",
@@ -209,57 +311,86 @@ public final class PeopleStore {
 
     /// Conservative defaults; uncertain faces remain reviewable and never enter automatic person search.
     public func rematch() throws {
+        let existing = try rematchMarker()
+        let marker = existing.flatMap { $0 == "0" ? nil : $0 } ?? UUID().uuidString
+        if marker != existing {
+            try db.run("INSERT OR REPLACE INTO meta(key,value) VALUES('people.rematchNeeded',?)", [.text(marker)])
+        }
+        try rematch(clearingMarker: marker)
+    }
+
+    /// Recompute matches in bounded pages. The marker is removed only if no newer write requested another pass.
+    private func rematch(clearingMarker marker: String) throws {
         var references: [Int64: [[Float]]] = [:]
         try db.query("SELECT person,vector FROM person_references WHERE model=?", [.text(FaceIdentity.version)]) {
             if let vector = FaceIdentity.vector($0.blob(1)) { references[$0.int(0), default: []].append(vector) }
         }
-        var matches: [(Int64, Int64?, Double, String)] = []
-        try db.query("""
-            SELECT f.id,f.vector FROM faces f JOIN face_files d ON d.file=f.file JOIN files s ON s.id=f.file
-            LEFT JOIN face_matches m ON m.face=f.id
-            WHERE f.model=? AND d.model=? AND d.stamp=CAST(s.size AS TEXT)||':'||CAST(s.mtime AS TEXT)
-            AND (m.status IS NULL OR m.status IN ('auto','suggested'))
-            """, [.text(FaceIdentity.version), .text(try indexingVersion())]) { row in
-            guard let vector = FaceIdentity.vector(row.blob(1)) else { return }
-            var scores: [(Int64, Float)] = []
-            for (person, samples) in references {
-                var best: Float = -1
-                for sample in samples {
-                    var dot: Float = 0
-                    for i in 0..<FaceIdentity.dimension { dot += vector[i] * sample[i] }
-                    best = max(best, dot)
+        let stamp = Self.fileStampSQL("s")
+        let policy = try indexingVersion()
+        var cursor: Int64 = 0
+        while true {
+            var vectors: [(Int64, [Float])] = []
+            var nextCursor = cursor
+            try db.query("""
+                SELECT f.id,f.vector FROM faces f JOIN face_files d ON d.file=f.file JOIN files s ON s.id=f.file
+                LEFT JOIN face_matches m ON m.face=f.id
+                WHERE f.id>? AND f.model=? AND d.model=? AND d.stamp=\(stamp)
+                AND (m.status IS NULL OR m.status IN ('auto','suggested'))
+                ORDER BY f.id LIMIT 256
+                """, [.int(cursor), .text(FaceIdentity.version), .text(policy)]) { row in
+                nextCursor = row.int(0)
+                if let vector = FaceIdentity.vector(row.blob(1)) { vectors.append((row.int(0), vector)) }
+            }
+            guard nextCursor > cursor else { break }
+            cursor = nextCursor
+
+            let matches = vectors.map { face, vector -> (Int64, Int64?, Double, String) in
+                var scores: [(Int64, Float)] = []
+                for (person, samples) in references {
+                    var best: Float = -1
+                    for sample in samples {
+                        var dot: Float = 0
+                        for i in 0..<FaceIdentity.dimension { dot += vector[i] * sample[i] }
+                        best = max(best, dot)
+                    }
+                    scores.append((person,best))
                 }
-                scores.append((person,best))
+                scores.sort { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }
+                let best = scores.first
+                let margin = (best?.1 ?? 0) - (scores.dropFirst().first?.1 ?? -1)
+                let status = (best?.1 ?? -1) >= 0.50 && margin >= 0.08 ? "auto" : "suggested"
+                return (face, (best?.1 ?? -1) >= 0.35 ? best?.0 : nil, Double(best?.1 ?? 0), status)
             }
-            scores.sort { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }
-            let best = scores.first
-            let margin = (best?.1 ?? 0) - (scores.dropFirst().first?.1 ?? -1)
-            let status = (best?.1 ?? -1) >= 0.50 && margin >= 0.08 ? "auto" : "suggested"
-            matches.append((row.int(0), (best?.1 ?? -1) >= 0.35 ? best?.0 : nil, Double(best?.1 ?? 0), status))
-        }
-        try db.transaction {
-            for (face, person, score, status) in matches {
-                try db.run("""
-                    INSERT INTO face_matches(face,person,score,status) VALUES(?,?,?,?)
-                    ON CONFLICT(face) DO UPDATE SET person=excluded.person,score=excluded.score,status=excluded.status
-                    WHERE face_matches.status IN ('auto','suggested')
-                    """,
-                           [.int(face), person.map(SQLValue.int) ?? .null, .double(score), .text(status)])
+            try db.transaction {
+                for (face, person, score, status) in matches {
+                    try db.run("""
+                        INSERT INTO face_matches(face,person,score,status)
+                        SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM faces WHERE id=?)
+                            AND (? IS NULL OR EXISTS(SELECT 1 FROM people WHERE id=?))
+                        ON CONFLICT(face) DO UPDATE SET person=excluded.person,score=excluded.score,status=excluded.status
+                        WHERE face_matches.status IN ('auto','suggested')
+                        """,
+                               [.int(face), person.map(SQLValue.int) ?? .null, .double(score), .text(status), .int(face),
+                                person.map(SQLValue.int) ?? .null, person.map(SQLValue.int) ?? .null])
+                }
             }
-            try db.run("INSERT OR REPLACE INTO meta(key,value) VALUES('people.rematchNeeded','0')")
         }
+        try db.run("DELETE FROM meta WHERE key='people.rematchNeeded' AND value=?", [.text(marker)])
     }
-    public func review(person: Int64? = nil, limit: Int = 100) throws -> [FaceReview] {
+    public func review(person: Int64? = nil, selection: FacePhotoSelection? = nil, limit: Int = 100) throws -> [FaceReview] {
         var rows: [FaceReview] = []
         let policy = try indexingVersion()
+        let stamp = Self.fileStampSQL("s")
         let clause = person == nil ? "AND COALESCE(m.status,'suggested') IN ('auto','suggested')" : "AND m.person=?"
+        let (selectionSQL, selectionValues) = selection?.sqlPredicate(pathExpression: "s.path") ?? ("1", [])
         try db.query("""
             SELECT f.id,s.path,f.jpeg,m.person,p.name,COALESCE(m.score,0),COALESCE(m.status,'suggested')
             FROM faces f JOIN files s ON s.id=f.file JOIN face_files d ON d.file=f.file
             LEFT JOIN face_matches m ON m.face=f.id LEFT JOIN people p ON p.id=m.person
-            WHERE f.model=? AND d.model=? AND d.stamp=CAST(s.size AS TEXT)||':'||CAST(s.mtime AS TEXT)
+            WHERE f.model=? AND d.model=? AND d.stamp=\(stamp) AND \(selectionSQL)
             \(clause) ORDER BY CASE m.status WHEN 'suggested' THEN 0 WHEN 'auto' THEN 1 ELSE 2 END,f.id DESC LIMIT ?
-            """, [.text(FaceIdentity.version), .text(policy)] + (person.map { [SQLValue.int($0)] } ?? []) + [.int(Int64(limit))]) { row in
+            """, [.text(FaceIdentity.version), .text(policy)] + selectionValues
+                + (person.map { [SQLValue.int($0)] } ?? []) + [.int(Int64(max(0, limit)))]) { row in
             rows.append(FaceReview(id: row.int(0), path: row.text(1) ?? "", jpeg: row.blob(2) ?? Data(),
                 person: row.isNull(3) ? nil : row.int(3), name: row.text(4), score: row.double(5), status: row.text(6) ?? "suggested"))
         }
@@ -269,16 +400,23 @@ public final class PeopleStore {
         try db.run("INSERT OR REPLACE INTO face_matches(face,person,score,status) VALUES(?,?,1,?)",
                    [.int(face), person.map(SQLValue.int) ?? .null, .text(person == nil ? "rejected" : "confirmed")])
     }
-    public func fileIDs(for people: [Int64]) throws -> Set<Int64> {
+    public func fileIDs(for people: [Int64], selection: FacePhotoSelection? = nil) throws -> Set<Int64> {
         guard !people.isEmpty else { return [] }
         var sets: [Set<Int64>] = []
+        let stamp = Self.fileStampSQL("s")
+        let (faceSelectionSQL, faceSelectionValues) = selection?.sqlPredicate(pathExpression: "s.path") ?? ("1", [])
+        let (documentSelectionSQL, documentSelectionValues) = selection?.sqlPredicate(pathExpression: "f.path") ?? ("1", [])
         for person in people {
             var files = Set<Int64>()
             try db.query("""
-                SELECT DISTINCT f.file FROM faces f JOIN face_matches m ON m.face=f.id JOIN files s ON s.id=f.file
+                SELECT DISTINCT f.file,s.path FROM faces f JOIN face_matches m ON m.face=f.id JOIN files s ON s.id=f.file
                 JOIN face_files d ON d.file=f.file WHERE m.person=? AND m.status IN ('auto','confirmed')
-                AND d.stamp=CAST(s.size AS TEXT)||':'||CAST(s.mtime AS TEXT) AND f.model=? AND d.model=?
-                """, [.int(person), .text(FaceIdentity.version), .text(try indexingVersion())]) { files.insert($0.int(0)) }
+                AND d.stamp=\(stamp) AND f.model=? AND d.model=?
+                AND \(faceSelectionSQL)
+                """, [.int(person), .text(FaceIdentity.version), .text(try indexingVersion())] + faceSelectionValues) { row in
+                let path = row.text(1) ?? ""
+                if selection == nil || FileManager.default.fileExists(atPath: path) { files.insert(row.int(0)) }
+            }
             // Names in extracted document/audio text are searchable evidence, distinct from face matches.
             // Do not use photo folder names: evaluation labels and album names are not face evidence.
             var aliases: [String] = []
@@ -288,9 +426,13 @@ public final class PeopleStore {
             let pattern = aliases.filter { !$0.isEmpty }.map { "\"" + SearchText.normalized($0).replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: " OR ")
             if !pattern.isEmpty {
                 try db.query("""
-                    SELECT DISTINCT s.file FROM fts JOIN segments s ON s.id=fts.rowid JOIN files f ON f.id=s.file
+                    SELECT DISTINCT s.file,f.path FROM fts JOIN segments s ON s.id=fts.rowid JOIN files f ON f.id=s.file
                     WHERE fts MATCH ? AND s.kind != 'name' AND f.kind IN ('pdf','doc','audio')
-                    """, [.text(pattern)]) { files.insert($0.int(0)) }
+                    AND \(documentSelectionSQL)
+                    """, [.text(pattern)] + documentSelectionValues) { row in
+                    let path = row.text(1) ?? ""
+                    if selection == nil || FileManager.default.fileExists(atPath: path) { files.insert(row.int(0)) }
+                }
             }
             sets.append(files)
         }
@@ -303,17 +445,21 @@ public final class PeopleStore {
         let tokens = query.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
         var owners: [String: [PersonProfile]] = [:]
         for profile in profiles {
-            for alias in Set([profile.name] + profile.aliases) { owners[alias.lowercased(), default: []].append(profile) }
+            for alias in Set([profile.name] + profile.aliases) {
+                let parts = alias.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map { $0.lowercased() }
+                if !parts.isEmpty { owners[parts.joined(separator: " "), default: []].append(profile) }
+            }
         }
-        var found: [Int64: PersonProfile] = [:], used = Set<Int>(), ambiguous = Set<String>()
+        var found: [Int64: PersonProfile] = [:], claimed = Set<Int>(), used = Set<Int>(), ambiguous = Set<String>()
         // Longer aliases first; word boundaries prevent "Ann" matching "annual".
         for alias in owners.keys.sorted(by: { $0.count > $1.count }) {
             let parts = alias.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map { $0.lowercased() }
             guard !parts.isEmpty, parts.count <= tokens.count else { continue }
             for start in 0...(tokens.count - parts.count) {
                 let range = start..<(start + parts.count)
-                guard range.allSatisfy({ !used.contains($0) }), range.map({ tokens[$0].lowercased() }) == parts else { continue }
+                guard range.allSatisfy({ !claimed.contains($0) }), range.map({ tokens[$0].lowercased() }) == parts else { continue }
                 let choices = Dictionary(owners[alias, default: []].map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                claimed.formUnion(range)
                 guard choices.count == 1, let person = choices.values.first else { ambiguous.insert(alias); continue }
                 found[person.id] = person; used.formUnion(range)
             }

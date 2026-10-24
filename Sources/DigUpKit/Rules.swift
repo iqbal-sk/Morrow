@@ -135,7 +135,7 @@ public enum Rules {
 
     /// Whether a change the folder watcher reports at `path` is where the crawl of `root` goes: not inside a folder it
     /// skips (hidden, .noindex and developer folders, ~/Library, the skipped ones). A change anywhere else asks for a
-    /// sync that finds nothing new. With the home folder chosen, that's DigUp's own writes too: its index and its log
+    /// sync that finds nothing new. With the home folder chosen, that's Morrow's own writes too: its index and its log
     /// live under ~/Library, and the log line about a change is a change again.
     public static func isWalked(_ path: String, root: String, home: String, excluded: [String]) -> Bool {
         guard path == root || FolderSelection.isInside(path, root) else { return false }

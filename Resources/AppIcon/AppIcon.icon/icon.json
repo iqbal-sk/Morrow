@@ -1,28 +1,23 @@
 {
-  "fill" : {
-    "solid" : "srgb:0.07451,0.12549,0.10196,1.00000"
+  "fill": {
+    "solid": "srgb:1.0,0.965,0.925,1.00000"
   },
-  "groups" : [
+  "groups": [
     {
-      "layers" : [
+      "layers": [
         {
-          "image-name" : "d-mark.svg",
-          "name" : "d-mark"
+          "image-name": "reveal-peach.png",
+          "name": "Peach fold"
+        },
+        {
+          "image-name": "reveal-coral.png",
+          "name": "Coral frame"
         }
       ],
-      "name" : "D"
-    },
-    {
-      "layers" : [
-        {
-          "image-name" : "tiles.svg",
-          "name" : "tiles"
-        }
-      ],
-      "name" : "Tiles"
+      "name": "The Reveal"
     }
   ],
-  "supported-platforms" : {
-    "squares" : "shared"
+  "supported-platforms": {
+    "squares": "shared"
   }
 }

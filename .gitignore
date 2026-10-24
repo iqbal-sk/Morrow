@@ -26,3 +26,13 @@ shell/src-tauri/gen/
 # What scripts/package-*.sh gather for the packages
 shell/src-tauri/helper/
 shell/src-tauri/THIRD-PARTY-NOTICES.txt
+
+# Local design notes and UI audit reports are not part of the product repository.
+.interface-design/
+docs/APP-BEHAVIOR-AUDIT.md
+docs/CORAL-UI-REVIEW.md
+docs/NATIVE-MACOS-UI.md
+
+# Superseded icon experiments; current exports use the reveal-* layers.
+Resources/AppIcon/AppIcon.icon/Assets/morrow-coral.png
+Resources/AppIcon/AppIcon.icon/Assets/morrow-mark.svg
