@@ -27,19 +27,32 @@ public final class FaceRecognizer {
         guard image.width == 112, image.height == 112 else { throw FaceError("Aligned face must be 112 × 112") }
         return try embed(Self.pixels(image))
     }
-    public func detect(_ url: URL) throws -> FacePhoto {
+    public func detect(_ url: URL, minimumFacePixels: Int = FaceIdentity.defaultMinimumFacePixels) throws -> FacePhoto {
         let started = Date()
         let image = try Self.decode(url, maxPixels: 1600)
+        let handler = VNImageRequestHandler(cgImage: image)
+        let width = Double(image.width), height = Double(image.height)
+        let minimumSide = Double(min(128, max(0, minimumFacePixels)))
+        let rectangles = VNDetectFaceRectanglesRequest()
+        rectangles.revision = 3
+        try handler.perform([rectangles])
+        let candidates = (rectangles.results ?? []).filter { observation in
+            min(observation.boundingBox.width * width, observation.boundingBox.height * height) >= minimumSide
+        }
         let request = VNDetectFaceLandmarksRequest()
         request.revision = 3
-        try VNImageRequestHandler(cgImage: image).perform([request])
-        let pixels = try Self.pixels(image)
-        let width = Double(image.width), height = Double(image.height)
+        request.inputFaceObservations = candidates
+        if !candidates.isEmpty { try handler.perform([request]) }
+        var pixels: [UInt8]?
         var results: [FaceSample] = []
         for face in (request.results ?? []).sorted(by: { $0.boundingBox.midX < $1.boundingBox.midX }) {
+            let box = face.boundingBox
+            // Small boxes were removed before landmark analysis; keep this guard for malformed Vision output.
+            guard min(box.width * width, box.height * height) >= minimumSide else { continue }
             guard let left = Self.centre(face.landmarks?.leftEye), let right = Self.centre(face.landmarks?.rightEye),
                   let mouth = Self.centre(face.landmarks?.outerLips) else { continue }
-            let box = face.boundingBox
+            if pixels == nil { pixels = try Self.pixels(image) }
+            guard let pixels else { continue }
             func pixel(_ p: CGPoint) -> CGPoint {
                 CGPoint(x: (box.minX + p.x * box.width) * width, y: (1 - box.minY - p.y * box.height) * height)
             }

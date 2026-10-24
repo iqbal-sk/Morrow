@@ -12,6 +12,7 @@ struct PeopleSettings: View {
     @State private var editingPerson: PersonProfile?
     @State private var importing = false
     @State private var photos: [URL] = []
+    @State private var importBatchID = UUID()
     @State private var removing: PersonProfile?
     private var selected: PersonProfile? { people.profiles.first { $0.id == people.selectedPerson } }
 
@@ -30,6 +31,21 @@ struct PeopleSettings: View {
                 Image(systemName: "lock.shield").foregroundStyle(Brand.moss)
                 Text("Photos and face matches stay on this Mac.").font(.callout).foregroundStyle(.secondary)
             }
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 12) {
+                        Text("Minimum face size")
+                        Slider(value: Binding(get: { Double(people.minimumFacePixels) },
+                                              set: { people.setMinimumFacePixels(Int($0)) }), in: 0...128, step: 8)
+                        Text(people.minimumFacePixels == 0 ? "Off" : "\(people.minimumFacePixels) px")
+                            .monospacedDigit().frame(width: 54, alignment: .trailing)
+                    }
+                    Text(people.isUpdatingFacePolicy
+                         ? "Applying the new filter. Existing photos will be checked again."
+                         : "Smaller faces are skipped before identity matching and stay out of review. 0 keeps every face. Changing this rechecks photos in your chosen folders.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } label: { Label("Face detection", systemImage: "viewfinder") }
             if let problem = people.problem {
                 HStack(alignment: .top) {
                     Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
@@ -143,6 +159,15 @@ struct PeopleSettings: View {
                     Button(people.isPaused ? "Resume" : "Pause") { people.isPaused ? people.resume() : people.pause() }
                 }
             }
+            if people.failedPhotos > 0 {
+                HStack {
+                    Label("\(people.failedPhotos.formatted()) photos could not be checked", systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Retry") { people.retryFailedPhotos() }
+                        .disabled(!people.enabled || people.isPaused || people.isScanning)
+                }
+            }
         }
         .padding(24)
         .task { await people.refresh(); if people.selectedPerson == nil { people.selectedPerson = people.profiles.first?.id; await people.refresh() } }
@@ -152,7 +177,7 @@ struct PeopleSettings: View {
         }
         .sheet(isPresented: $editor) { PersonEditor(person: editingPerson, people: people) }
         .sheet(isPresented: $importing) {
-            if let person = selected { ReferencePicker(person: person, photos: photos, people: people) }
+            if let person = selected { ReferencePicker(person: person, photos: photos, batchID: importBatchID, people: people).id(importBatchID) }
         }
         .confirmationDialog("Remove \(removing?.name ?? "this person")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
             Button("Remove Person", role: .destructive) { if let person = removing { Task { await people.removePerson(person.id) } }; removing = nil }
@@ -162,7 +187,11 @@ struct PeopleSettings: View {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = true; panel.canChooseDirectories = false
         panel.message = "Choose reference photos of \(selected?.name ?? "this person"). You’ll select the face in each photo."
-        if panel.runModal() == .OK { photos = panel.urls; importing = true }
+        if panel.runModal() == .OK, !panel.urls.isEmpty {
+            photos = panel.urls
+            importBatchID = UUID()
+            importing = true
+        }
     }
 }
 
@@ -238,20 +267,22 @@ private struct PersonEditor: View {
 private struct ReferencePicker: View {
     let person: PersonProfile
     let photos: [URL]
+    let batchID: UUID
     let people: PeopleCoordinator
     @Environment(\.dismiss) private var dismiss
     @State private var index = 0
     @State private var faces: [FaceSample] = []
     @State private var selection: String?
     @State private var loading = true
+    @State private var savingReference = false
     @State private var problem: String?
     @State private var image: NSImage?
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Which face is \(person.name)?").font(.title2.weight(.semibold))
-            Text("Photo \(index+1) of \(photos.count) · Select one face to use as a reference.").foregroundStyle(.secondary)
+            Text("Photo \(min(index + 1, max(photos.count, 1))) of \(photos.count) · Select one face to use as a reference.").foregroundStyle(.secondary)
             if let image { Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: .infinity).frame(height: 220).clipShape(RoundedRectangle(cornerRadius: 8)) }
-            if loading { HStack { ProgressView().controlSize(.small); Text("Finding faces…") }.frame(height: 90) }
+            if loading { HStack { ProgressView().controlSize(.small); Text(savingReference ? "Saving reference…" : "Finding faces…") }.frame(height: 90) }
             else if let problem { Label(problem, systemImage: "exclamationmark.triangle").foregroundStyle(.secondary).frame(minHeight: 80) }
             else {
                 ScrollView(.horizontal) {
@@ -269,26 +300,53 @@ private struct ReferencePicker: View {
                 }
             }
             HStack {
-                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction).disabled(savingReference)
                 Spacer()
-                Button("Skip Photo") { next() }.disabled(loading)
+                Button("Skip Photo") { next() }.disabled(loading || savingReference)
                 Button("Use Selected Face") {
                     guard let face = faces.first(where: { $0.id == selection }) else { return }
+                    guard photos.indices.contains(index) else { return }
+                    let source = photos[index]
                     loading = true
-                    Task { await people.addReference(person: person.id, face: face, source: photos[index]); next() }
-                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(loading || selection == nil)
+                    savingReference = true
+                    Task {
+                        let saved = await people.addReference(person: person.id, face: face, source: source)
+                        savingReference = false
+                        loading = false
+                        if saved { next() }
+                    }
+                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(loading || selection == nil || savingReference)
             }
         }.padding(24).frame(width: 490)
-            .task(id: index) {
+            .onAppear { people.beginReferenceImport() }
+            .onDisappear { people.endReferenceImport() }
+            .task(id: "\(batchID.uuidString)-\(index)-\(people.minimumFacePixels)") {
+                guard photos.indices.contains(index) else {
+                    image = nil; faces = []; loading = false
+                    problem = photos.isEmpty ? "Choose at least one photo." : "This photo batch changed. Close and choose the photos again."
+                    return
+                }
+                let requestedIndex = index
+                let photo = photos[requestedIndex]
                 loading = true; problem = nil; selection = nil; faces = []
-                image = NSImage(contentsOf: photos[index])
+                image = NSImage(contentsOf: photo)
                 do {
-                    faces = try await people.candidates(photos[index]).faces
+                    let candidates = try await people.candidates(photo)
+                    guard !Task.isCancelled, index == requestedIndex, photos.indices.contains(requestedIndex),
+                          photos[requestedIndex] == photo else { return }
+                    faces = candidates.faces
                     if faces.count == 1 { selection = faces[0].id }
                     if faces.isEmpty { problem = "No usable face was detected. Try a clearer, more front-facing photo." }
-                } catch { problem = error.localizedDescription }
-                loading = false
+                } catch {
+                    guard !Task.isCancelled, index == requestedIndex else { return }
+                    problem = error.localizedDescription
+                }
+                if !Task.isCancelled, index == requestedIndex { loading = false }
             }
     }
-    private func next() { if index+1 < photos.count { index += 1 } else { dismiss() } }
+    private func next() {
+        guard !photos.isEmpty else { dismiss(); return }
+        let nextIndex = index + 1
+        if photos.indices.contains(nextIndex) { index = nextIndex } else { dismiss() }
+    }
 }

@@ -4,6 +4,10 @@ import Foundation
 public enum FaceIdentity {
     public static let version = "sface-2021dec-vision3-similarity3-1600-rgb112-v1"
     public static let dimension = 128
+    public static let defaultMinimumFacePixels = 48
+    public static func indexingVersion(minimumFacePixels: Int) -> String {
+        "\(version)-min-side-\(min(128, max(0, minimumFacePixels)))"
+    }
     public static func normalized(_ values: [Float]) throws -> [Float] {
         let norm = sqrt(values.reduce(Float(0)) { $0 + $1 * $1 })
         guard values.count == dimension, values.allSatisfy(\.isFinite), norm.isFinite, norm > 0 else {
@@ -88,13 +92,38 @@ public final class PeopleStore {
     public init(directory: URL) throws { store = try IndexStore(directory: directory) }
     public init(store: IndexStore) { self.store = store }
 
+    public func minimumFacePixels() throws -> Int {
+        var value = FaceIdentity.defaultMinimumFacePixels
+        try db.query("SELECT value FROM meta WHERE key='people.minimumFacePixels'") {
+            value = Int($0.text(0) ?? "") ?? FaceIdentity.defaultMinimumFacePixels
+        }
+        return min(128, max(0, value))
+    }
+    public func setMinimumFacePixels(_ value: Int) throws {
+        let value = min(128, max(0, value))
+        try db.run("INSERT OR REPLACE INTO meta(key,value) VALUES('people.minimumFacePixels',?)", [.text(String(value))])
+    }
+    private func indexingVersion() throws -> String { FaceIdentity.indexingVersion(minimumFacePixels: try minimumFacePixels()) }
+    private func markRematchNeeded() throws {
+        try db.run("INSERT OR REPLACE INTO meta(key,value) VALUES('people.rematchNeeded','1')")
+    }
+    public func rematchIfNeeded() throws {
+        var needed = false
+        try db.query("SELECT value FROM meta WHERE key='people.rematchNeeded'") { needed = $0.text(0) == "1" }
+        if needed { try rematch() }
+    }
+
     public func profiles() throws -> [PersonProfile] {
         var profiles: [PersonProfile] = []
+        let policy = try indexingVersion()
         try db.query("""
             SELECT p.id,p.name,p.aliases,(SELECT COUNT(*) FROM person_references r WHERE r.person=p.id),
-            (SELECT COUNT(DISTINCT f.file) FROM faces f JOIN face_matches m ON m.face=f.id WHERE m.person=p.id AND m.status IN ('auto','confirmed')),
+            (SELECT COUNT(DISTINCT f.file) FROM faces f JOIN face_matches m ON m.face=f.id
+                JOIN face_files d ON d.file=f.file JOIN files s ON s.id=f.file
+                WHERE m.person=p.id AND m.status IN ('auto','confirmed') AND f.model=? AND d.model=?
+                AND d.stamp=CAST(s.size AS TEXT)||':'||CAST(s.mtime AS TEXT)),
             (SELECT jpeg FROM person_references r WHERE r.person=p.id ORDER BY r.id LIMIT 1) FROM people p ORDER BY p.name COLLATE NOCASE
-            """) { row in
+            """, [.text(FaceIdentity.version), .text(policy)]) { row in
             profiles.append(PersonProfile(id: row.int(0), name: row.text(1) ?? "", aliases: Self.strings(row.text(2)),
                                           references: Int(row.int(3)), files: Int(row.int(4)), portrait: row.blob(5)))
         }
@@ -112,10 +141,14 @@ public final class PeopleStore {
         try db.run("INSERT INTO people(name,aliases) VALUES(?,?)", [.text(name), .text(json)])
         return db.lastInsertID
     }
-    public func deletePerson(_ id: Int64) throws { try db.run("DELETE FROM people WHERE id=?", [.int(id)]) }
+    public func deletePerson(_ id: Int64) throws {
+        try db.run("DELETE FROM people WHERE id=?", [.int(id)])
+        try markRematchNeeded()
+    }
     public func addReference(person: Int64, sample: FaceSample, source: String) throws {
         try db.run("INSERT INTO person_references(person,vector,jpeg,source,model) VALUES(?,?,?,?,?)",
                    [.int(person), .blob(try FaceIdentity.data(sample.vector)), .blob(sample.jpeg), .text(source), .text(FaceIdentity.version)])
+        try markRematchNeeded()
     }
     public func references(person: Int64) throws -> [(Int64, Data)] {
         var rows: [(Int64, Data)] = []
@@ -124,26 +157,43 @@ public final class PeopleStore {
         }
         return rows
     }
-    public func deleteReference(_ id: Int64) throws { try db.run("DELETE FROM person_references WHERE id=?", [.int(id)]) }
+    public func deleteReference(_ id: Int64) throws {
+        try db.run("DELETE FROM person_references WHERE id=?", [.int(id)])
+        try markRematchNeeded()
+    }
     public func pendingPhotos() throws -> [(Int64, String, String)] {
         var rows: [(Int64, String, String)] = []
+        let policy = try indexingVersion()
         try db.query("""
             SELECT f.id,f.path,CAST(f.size AS TEXT)||':'||CAST(f.mtime AS TEXT) FROM files f
             LEFT JOIN face_files d ON d.file=f.id WHERE f.kind IN ('image','screenshot')
             AND (d.file IS NULL OR d.stamp != CAST(f.size AS TEXT)||':'||CAST(f.mtime AS TEXT) OR d.model != ?)
             ORDER BY f.mtime DESC
-            """, [.text(FaceIdentity.version)]) { rows.append(($0.int(0), $0.text(1) ?? "", $0.text(2) ?? "")) }
+            """, [.text(policy)]) { rows.append(($0.int(0), $0.text(1) ?? "", $0.text(2) ?? "")) }
         return rows
     }
-    public func saveFaces(file: Int64, stamp: String, samples: [FaceSample], error: String? = nil) throws {
+    public func failedPhotos() throws -> Int {
+        var count = 0
+        try db.query("""
+            SELECT COUNT(*) FROM face_files d JOIN files s ON s.id=d.file
+            WHERE d.model=? AND d.error IS NOT NULL AND d.stamp=CAST(s.size AS TEXT)||':'||CAST(s.mtime AS TEXT)
+            """, [.text(try indexingVersion())]) { count = Int($0.int(0)) }
+        return count
+    }
+    public func retryFailedPhotos() throws {
+        try db.run("DELETE FROM face_files WHERE error IS NOT NULL AND model=?", [.text(try indexingVersion())])
+    }
+    public func saveFaces(file: Int64, stamp: String, samples: [FaceSample], minimumFacePixels: Int = FaceIdentity.defaultMinimumFacePixels, error: String? = nil) throws {
+        let policy = FaceIdentity.indexingVersion(minimumFacePixels: minimumFacePixels)
         try db.transaction {
+            guard try self.minimumFacePixels() == minimumFacePixels else { return }
             // A helper may be processing a photo while the crawler updates or deletes it.
             var current: String?
             try db.query("SELECT CAST(size AS TEXT)||':'||CAST(mtime AS TEXT) FROM files WHERE id=?", [.int(file)]) { current = $0.text(0) }
             guard current == stamp else { return }
             var alreadySaved = false
             try db.query("SELECT 1 FROM face_files WHERE file=? AND stamp=? AND model=?",
-                         [.int(file), .text(stamp), .text(FaceIdentity.version)]) { _ in alreadySaved = true }
+                         [.int(file), .text(stamp), .text(policy)]) { _ in alreadySaved = true }
             guard !alreadySaved else { return }
             try db.run("DELETE FROM faces WHERE file=?", [.int(file)])
             for sample in samples {
@@ -152,7 +202,8 @@ public final class PeopleStore {
                     .blob(try FaceIdentity.data(sample.vector)), .blob(sample.jpeg), .text(FaceIdentity.version)])
             }
             try db.run("INSERT OR REPLACE INTO face_files(file,stamp,model,error) VALUES(?,?,?,?)",
-                       [.int(file), .text(stamp), .text(FaceIdentity.version), .optional(error)])
+                       [.int(file), .text(stamp), .text(policy), .optional(error)])
+            try self.markRematchNeeded()
         }
     }
 
@@ -164,9 +215,11 @@ public final class PeopleStore {
         }
         var matches: [(Int64, Int64?, Double, String)] = []
         try db.query("""
-            SELECT f.id,f.vector FROM faces f LEFT JOIN face_matches m ON m.face=f.id
-            WHERE f.model=? AND (m.status IS NULL OR m.status IN ('auto','suggested'))
-            """, [.text(FaceIdentity.version)]) { row in
+            SELECT f.id,f.vector FROM faces f JOIN face_files d ON d.file=f.file JOIN files s ON s.id=f.file
+            LEFT JOIN face_matches m ON m.face=f.id
+            WHERE f.model=? AND d.model=? AND d.stamp=CAST(s.size AS TEXT)||':'||CAST(s.mtime AS TEXT)
+            AND (m.status IS NULL OR m.status IN ('auto','suggested'))
+            """, [.text(FaceIdentity.version), .text(try indexingVersion())]) { row in
             guard let vector = FaceIdentity.vector(row.blob(1)) else { return }
             var scores: [(Int64, Float)] = []
             for (person, samples) in references {
@@ -193,16 +246,20 @@ public final class PeopleStore {
                     """,
                            [.int(face), person.map(SQLValue.int) ?? .null, .double(score), .text(status)])
             }
+            try db.run("INSERT OR REPLACE INTO meta(key,value) VALUES('people.rematchNeeded','0')")
         }
     }
     public func review(person: Int64? = nil, limit: Int = 100) throws -> [FaceReview] {
         var rows: [FaceReview] = []
-        let clause = person == nil ? "WHERE COALESCE(m.status,'suggested') IN ('auto','suggested')" : "WHERE m.person=?"
+        let policy = try indexingVersion()
+        let clause = person == nil ? "AND COALESCE(m.status,'suggested') IN ('auto','suggested')" : "AND m.person=?"
         try db.query("""
             SELECT f.id,s.path,f.jpeg,m.person,p.name,COALESCE(m.score,0),COALESCE(m.status,'suggested')
-            FROM faces f JOIN files s ON s.id=f.file LEFT JOIN face_matches m ON m.face=f.id LEFT JOIN people p ON p.id=m.person
+            FROM faces f JOIN files s ON s.id=f.file JOIN face_files d ON d.file=f.file
+            LEFT JOIN face_matches m ON m.face=f.id LEFT JOIN people p ON p.id=m.person
+            WHERE f.model=? AND d.model=? AND d.stamp=CAST(s.size AS TEXT)||':'||CAST(s.mtime AS TEXT)
             \(clause) ORDER BY CASE m.status WHEN 'suggested' THEN 0 WHEN 'auto' THEN 1 ELSE 2 END,f.id DESC LIMIT ?
-            """, (person.map { [SQLValue.int($0)] } ?? []) + [.int(Int64(limit))]) { row in
+            """, [.text(FaceIdentity.version), .text(policy)] + (person.map { [SQLValue.int($0)] } ?? []) + [.int(Int64(limit))]) { row in
             rows.append(FaceReview(id: row.int(0), path: row.text(1) ?? "", jpeg: row.blob(2) ?? Data(),
                 person: row.isNull(3) ? nil : row.int(3), name: row.text(4), score: row.double(5), status: row.text(6) ?? "suggested"))
         }
@@ -220,8 +277,8 @@ public final class PeopleStore {
             try db.query("""
                 SELECT DISTINCT f.file FROM faces f JOIN face_matches m ON m.face=f.id JOIN files s ON s.id=f.file
                 JOIN face_files d ON d.file=f.file WHERE m.person=? AND m.status IN ('auto','confirmed')
-                AND d.stamp=CAST(s.size AS TEXT)||':'||CAST(s.mtime AS TEXT) AND f.model=?
-                """, [.int(person), .text(FaceIdentity.version)]) { files.insert($0.int(0)) }
+                AND d.stamp=CAST(s.size AS TEXT)||':'||CAST(s.mtime AS TEXT) AND f.model=? AND d.model=?
+                """, [.int(person), .text(FaceIdentity.version), .text(try indexingVersion())]) { files.insert($0.int(0)) }
             // Names in extracted document/audio text are searchable evidence, distinct from face matches.
             // Do not use photo folder names: evaluation labels and album names are not face evidence.
             var aliases: [String] = []

@@ -11,13 +11,17 @@ func faceService(_ command: String, raw: [String]) throws {
     if command == "face-detect" || command == "face-embed-aligned" {
         guard let path = argument("--photo") else { throw FaceError("Choose a reference photo") }
         let data: Data
-        if command == "face-detect" { data = try JSONEncoder().encode(recognizer.detect(URL(fileURLWithPath: path))) }
+        if command == "face-detect" {
+            let minimum = argument("--min-face-pixels").flatMap(Int.init) ?? FaceIdentity.defaultMinimumFacePixels
+            data = try JSONEncoder().encode(recognizer.detect(URL(fileURLWithPath: path), minimumFacePixels: minimum))
+        }
         else { data = try JSONEncoder().encode(recognizer.embedAligned(URL(fileURLWithPath: path))) }
         FileHandle.standardOutput.write(data + Data([10]))
         return
     }
     guard let index = argument("--index") else { throw FaceError("Choose an index") }
     let store = try PeopleStore(directory: URL(fileURLWithPath: index))
+    let minimumFacePixels = try store.minimumFacePixels()
     var pending = try store.pendingPhotos()
     if let raw = argument("--selection"), let data = raw.data(using: .utf8) {
         let selection = try JSONDecoder().decode([String: [String]].self, from: data)
@@ -30,10 +34,10 @@ func faceService(_ command: String, raw: [String]) throws {
     for (offset, job) in pending.prefix(limit).enumerated() {
         autoreleasepool {
             do {
-                let photo = try recognizer.detect(URL(fileURLWithPath: job.1))
-                try store.saveFaces(file: job.0, stamp: job.2, samples: photo.faces)
+                let photo = try recognizer.detect(URL(fileURLWithPath: job.1), minimumFacePixels: minimumFacePixels)
+                try store.saveFaces(file: job.0, stamp: job.2, samples: photo.faces, minimumFacePixels: minimumFacePixels)
             } catch {
-                try? store.saveFaces(file: job.0, stamp: job.2, samples: [], error: error.localizedDescription)
+                try? store.saveFaces(file: job.0, stamp: job.2, samples: [], minimumFacePixels: minimumFacePixels, error: error.localizedDescription)
             }
         }
         if offset % 20 == 0 { try store.rematch() }
