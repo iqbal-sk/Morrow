@@ -11,7 +11,7 @@ APP="$PWD/build.noindex/preview/Morrow.app"
 RELEASE=0 SIGN_ID=- APP_PATH="$APP" ./build.sh
 VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP/Contents/Info.plist")
 ARCH="$(lipo -archs "$APP/Contents/MacOS/Morrow" | tr ' ' '-')"
-DMG="${APP%/*}/Morrow-$VERSION-$ARCH-preview.dmg"
+DMG="${APP%/*}/Morrow-$VERSION-$ARCH.dmg"
 # Never silently replace an existing artifact.
 scripts/create-dmg.sh "$APP" "$DMG"
 cd "${DMG%/*}"

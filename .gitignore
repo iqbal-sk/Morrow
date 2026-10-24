@@ -4,6 +4,10 @@
 build.noindex/
 /Vendor/
 
+# Distribute installers as release assets, even if copied outside build.noindex.
+*.dmg
+*.dmg.sha256
+
 # Dev runs (scripts/dev-run.sh): their indexes, models and settings
 .dev/
 
